@@ -6,6 +6,7 @@ import { buildColumnData, buildSourceDataMap } from '@/lib/feeds/compose';
 import { defaultFeedColumns, defaultFeedSources, feedSourceMap } from '@/lib/config/default-columns';
 import { fetchRedditSource } from '@/lib/feeds/reddit';
 import { fetchRssSource } from '@/lib/feeds/rss';
+import { publishFeedSourceUpdate } from '@/lib/feeds/live-updates';
 import { fetchWebCrawlSource } from '@/lib/feeds/web-crawl';
 import { FeedColumnData, FeedResponse, FeedSourceConfig, FeedSourceData, FeedSourceResult } from '@/lib/feeds/types';
 
@@ -45,6 +46,9 @@ async function getSourceResult(source: FeedSourceConfig) {
 	return getCachedValue(cacheKey, ttlMs, () => fetchSourcePayload(source), {
 		staleWhileRevalidateMs: isBackgroundCrawl ? 8 * 60_000 : 0,
 		refreshInBackground: isBackgroundCrawl,
+		onValueStored: (previousValue, nextValue) => {
+			publishFeedSourceUpdate(previousValue, nextValue);
+		},
 	});
 }
 

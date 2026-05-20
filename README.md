@@ -7,6 +7,7 @@
 - Aggregates RSS/Atom feeds and Reddit `.rss` feeds through a single internal API
 - Enriches RSS items with full article text and filters thin headline-only entries
 - Performs multi-depth crawler-backed crawling with per-domain rate limiting
+- Seeds the crawl watch lane from Bing/Google discovery pages, mines inline structured data, and scans relevant linked PDFs into cards
 - Extracts article metadata (author, publish date, category, linked documents)
 - Renders a compact multi-column dashboard with horizontal deck scrolling
 - Keeps vertical scrolling inside each column only for an app-like fullscreen layout
@@ -15,6 +16,7 @@
 - Uses virtualization to keep long columns responsive
 - Uses hydration-safe drag and drop for column reordering
 - Supports a crawler-backed watch lane using a small Scrapy bridge plus a built-in HTML fallback
+- Pushes live "new card ready" notifications over Server-Sent Events (SSE), with a slow fallback refresh instead of constant polling
 
 ## Current stack
 
@@ -32,7 +34,7 @@
 1. Install dependencies with `pnpm install`.
 2. Review `.env` and set `REDIS_URL` if you want Redis-backed caching.
 3. Start the development server with `pnpm dev`.
-4. Open the app in your browser and verify the feed columns load.
+4. Open the app in your browser and verify the feed columns load and the header shows `live updates on`.
 
 ## Environment variables
 
@@ -59,6 +61,36 @@ If Scrapy is not installed in the selected Python environment, the crawler lane 
 - `pnpm start` — run the production build locally
 - `pnpm lint` — run ESLint
 - `pnpm typecheck` — run TypeScript without emitting output
+- `pnpm test:rss` — test RSS export functionality (coming soon)
+
+## RSS Export
+
+All dashboard columns can be exported as standard RSS 2.0 feeds, enabling consumption by any RSS reader (Feedly, Apple News, Inoreader, NetNewsWire, etc.).
+
+### Export column as RSS
+
+```bash
+# Get a column as RSS XML
+curl http://localhost:3000/api/feeds/export/column.xml?columnId=technology
+```
+
+Paste the URL into any RSS reader to subscribe to live updates from that dashboard column.
+
+### Export all sources as OPML
+
+```bash
+# Get all feed sources in OPML format (for sharing/importing)
+curl http://localhost:3000/api/feeds/export/opml.ts
+```
+
+OPML is a standard format for sharing RSS subscriptions. Use this to import all feeds into another reader or to back up your subscription list.
+
+### Features
+
+- **Real-time**: RSS feeds reflect the same deduplication and enrichment as your dashboard
+- **Filtered**: Export respects column filtering (tags, source selection)
+- **Cached**: 5-minute cache on column RSS to reduce server load
+- **Standard**: Valid RSS 2.0 with proper XML escaping and metadata
 
 ## Architecture
 
@@ -67,18 +99,20 @@ If Scrapy is not installed in the selected Python environment, the crawler lane 
 1. `app/api/feeds/route.ts` fetches and aggregates upstream feed content.
 2. `lib/feeds/*` adapters normalize items into a shared feed model.
 3. `lib/cache/*` applies memory or Redis caching.
-4. `hooks/useFeedStream.ts` polls the internal API.
+4. `hooks/useFeedStream.ts` performs the initial fetch, listens to `/api/feeds/stream`, and only re-fetches when the server emits a real update (plus a slow safety fallback).
 5. `components/dashboard/*` render the deck UI, column virtualization, and drag/reorder behavior.
 6. `hooks/useColumnState.ts` persists local UI preferences and custom columns.
 
-`Crawl Watch` uses the `web-crawl` adapter with the small TypeScript Scrapy bridge in `lib/crawler/scrapy-runner.ts`. When Scrapy is unavailable, the adapter falls back to the built-in `cheerio` crawler. The default free watch query is `$TSLA`, and the crawler applies per-domain balancing so one source does not dominate the pinned right-most lane.
+`Crawl Watch` uses the `web-crawl` adapter with the small TypeScript Scrapy bridge in `lib/crawler/scrapy-runner.ts`. When Scrapy is unavailable, the adapter falls back to the built-in `cheerio` crawler. The default free watch query is `$TSLA`; the crawler is now seeded from Bing and Google search/news pages, mines inline JSON-LD or other structured data from the returned HTML, avoids quote/product landing pages, and follows relevant article-linked PDFs so filings and source documents can appear as cards.
 
 ### Important modules
 
 - `app/api/feeds/route.ts` — aggregated feed endpoint
+- `app/api/feeds/stream/route.ts` — SSE endpoint for push-based “new card ready” events
 - `app/api/health/route.ts` — cache and service health snapshot
 - `lib/config/default-columns.ts` — default sources and starter columns
 - `lib/feeds/types.ts` — canonical source, column, and item types
+- `lib/feeds/live-updates.ts` — in-process live update pub/sub and feed-change event generation
 - `lib/crawler/scrapy-runner.ts` — TypeScript bridge for the minimal generic Scrapy crawler
 - `lib/feeds/web-crawl.ts` — focused HTML crawler for watch-lane sources
 - `components/dashboard/NewsDeck.tsx` — main fullscreen dashboard shell

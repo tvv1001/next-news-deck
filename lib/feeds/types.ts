@@ -99,3 +99,16 @@ export interface FeedResponse {
 	sources: FeedSourceData[];
 	columns: FeedColumnData[];
 }
+
+export interface FeedLiveUpdate {
+	eventId: string;
+	emittedAt: string;
+	sourceId: string;
+	sourceTitle: string;
+	sourceKind: FeedSourceKind;
+	columnIds: string[];
+	fetchedAt: string;
+	staleAt: string;
+	totalItems: number;
+	newItems: FeedItem[];
+}

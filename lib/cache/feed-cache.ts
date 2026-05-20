@@ -17,6 +17,7 @@ interface CacheEnvelope<T> {
 export interface CacheOptions {
 	staleWhileRevalidateMs?: number;
 	refreshInBackground?: boolean;
+	onValueStored?: (previousValue: unknown, nextValue: unknown, metadata: { key: string; cacheMode: CacheMode }) => void | Promise<void>;
 }
 
 export interface CacheResult<T> {
@@ -49,13 +50,24 @@ async function storeCachedValue<T>(key: string, cacheMode: CacheMode, value: T, 
 	const freshUntil = now + freshTtlMs;
 	const envelope = serializeEnvelope(value, freshUntil);
 	const totalTtlMs = freshTtlMs + staleWhileRevalidateMs;
+	let previousValue: T | undefined;
 
 	if (cacheMode === 'redis') {
 		const redis = getRedisClient();
 		if (redis) {
+			const previousRawValue = await redis.get(key);
+			if (previousRawValue) {
+				previousValue = parseEnvelope<T>(previousRawValue, now + freshTtlMs).value;
+			}
+
 			await redis.set(key, envelope, 'PX', totalTtlMs);
-			return;
+			return previousValue;
 		}
+	}
+
+	const previousEntry = memoryCache.get(key);
+	if (previousEntry) {
+		previousValue = parseEnvelope<T>(previousEntry.value, previousEntry.freshUntil).value;
 	}
 
 	memoryCache.set(key, {
@@ -63,9 +75,11 @@ async function storeCachedValue<T>(key: string, cacheMode: CacheMode, value: T, 
 		freshUntil,
 		expiresAt: now + totalTtlMs,
 	});
+
+	return previousValue;
 }
 
-function queueBackgroundRefresh<T>(key: string, loader: () => Promise<T>, ttlMs: number, staleWhileRevalidateMs: number, cacheMode: CacheMode) {
+function queueBackgroundRefresh<T>(key: string, loader: () => Promise<T>, ttlMs: number, staleWhileRevalidateMs: number, cacheMode: CacheMode, options: CacheOptions) {
 	if (backgroundRefreshes.has(key)) {
 		return false;
 	}
@@ -73,7 +87,8 @@ function queueBackgroundRefresh<T>(key: string, loader: () => Promise<T>, ttlMs:
 	const refreshPromise = (async () => {
 		try {
 			const nextValue = await loader();
-			await storeCachedValue(key, cacheMode, nextValue, ttlMs, staleWhileRevalidateMs);
+			const previousValue = await storeCachedValue(key, cacheMode, nextValue, ttlMs, staleWhileRevalidateMs);
+			await options.onValueStored?.(previousValue, nextValue, { key, cacheMode });
 		} finally {
 			backgroundRefreshes.delete(key);
 		}
@@ -107,7 +122,7 @@ export async function getCachedValue<T>(key: string, ttlMs: number, loader: () =
 				}
 
 				if (refreshInBackground) {
-					const refreshing = queueBackgroundRefresh(key, loader, ttlMs, staleWhileRevalidateMs, 'redis');
+					const refreshing = queueBackgroundRefresh(key, loader, ttlMs, staleWhileRevalidateMs, 'redis', options);
 
 					return {
 						value: envelope.value,
@@ -119,7 +134,8 @@ export async function getCachedValue<T>(key: string, ttlMs: number, loader: () =
 				}
 
 				const refreshedValue = await loader();
-				await storeCachedValue(key, 'redis', refreshedValue, ttlMs, staleWhileRevalidateMs);
+				const previousValue = await storeCachedValue(key, 'redis', refreshedValue, ttlMs, staleWhileRevalidateMs);
+				await options.onValueStored?.(previousValue, refreshedValue, { key, cacheMode: 'redis' });
 
 				return {
 					value: refreshedValue,
@@ -130,6 +146,7 @@ export async function getCachedValue<T>(key: string, ttlMs: number, loader: () =
 
 			const value = await loader();
 			await redis.set(key, serializeEnvelope(value, now + ttlMs), 'PX', totalTtlMs);
+			await options.onValueStored?.(undefined, value, { key, cacheMode: 'redis' });
 
 			return {
 				value,
@@ -155,7 +172,7 @@ export async function getCachedValue<T>(key: string, ttlMs: number, loader: () =
 		}
 
 		if (refreshInBackground) {
-			const refreshing = queueBackgroundRefresh(key, loader, ttlMs, staleWhileRevalidateMs, 'memory');
+			const refreshing = queueBackgroundRefresh(key, loader, ttlMs, staleWhileRevalidateMs, 'memory', options);
 
 			return {
 				value: envelope.value,
@@ -167,7 +184,8 @@ export async function getCachedValue<T>(key: string, ttlMs: number, loader: () =
 		}
 
 		const refreshedValue = await loader();
-		await storeCachedValue(key, 'memory', refreshedValue, ttlMs, staleWhileRevalidateMs);
+		const previousValue = await storeCachedValue(key, 'memory', refreshedValue, ttlMs, staleWhileRevalidateMs);
+		await options.onValueStored?.(previousValue, refreshedValue, { key, cacheMode: 'memory' });
 
 		return {
 			value: refreshedValue,
@@ -177,7 +195,8 @@ export async function getCachedValue<T>(key: string, ttlMs: number, loader: () =
 	}
 
 	const value = await loader();
-	await storeCachedValue(key, 'memory', value, ttlMs, staleWhileRevalidateMs);
+	const previousValue = await storeCachedValue(key, 'memory', value, ttlMs, staleWhileRevalidateMs);
+	await options.onValueStored?.(previousValue, value, { key, cacheMode: 'memory' });
 
 	return {
 		value,

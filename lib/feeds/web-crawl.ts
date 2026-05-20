@@ -24,8 +24,14 @@ interface ExtractedPage {
 	discoverySource?: FeedItem['discoverySource'];
 }
 
+type JsonLdValue = null | boolean | number | string | JsonLdObject | JsonLdValue[];
+
+interface JsonLdObject {
+	[key: string]: JsonLdValue;
+}
+
 const DEFAULT_MAX_PAGES = 18;
-const DEFAULT_CRAWL_DEPTH = 2; // Increased from 1 for deeper crawl
+const DEFAULT_CRAWL_DEPTH = 4;
 const DEFAULT_MAX_ITEMS_PER_DOMAIN = 5;
 const MAX_LINKS_PER_PAGE = 50;
 const MAX_ENRICHMENT_LINKS = 6;
@@ -96,6 +102,12 @@ const BLOCKED_COMMERCE_TEXT_PATTERNS = [
 	/\b(shop now|buy now|add to cart|for sale|limited time offer|promo code|coupon code|discount code|free shipping|black friday|cyber monday)\b/i,
 	/\b(sponsored|advertisement|affiliate link|partner content|paid post)\b/i,
 	/\b(price:\s*\$|sale price|compare prices|best price)\b/i,
+];
+const BLOCKED_STOCK_LANDING_URL_PATTERNS = [/finance\.yahoo\.com\/quote\//i, /cnbc\.com\/quotes\//i, /sec\.gov\/edgar\/browse/i, /ir\.tesla\.com\/?$/i];
+const BLOCKED_STOCK_LANDING_TEXT_PATTERNS = [
+	/\b(previous close|open|bid|ask|day'?s range|52 week range|market cap|beta|pe ratio|eps|earnings date|avg volume|forward dividend|ex-dividend date)\b/i,
+	/\b(fair value|research report|my portfolio|watchlist|compare brokers|historical data|option chain)\b/i,
+	/\b(quote overview|stock chart|analyst recommendations|key statistics|financial highlights)\b/i,
 ];
 const BLOCKED_GENERIC_TEXT_PATTERNS = [
 	/\b(if you invested|how rich you would be|price prediction|stock price in 20\d{2}|quotes every \d+-year-old)\b/i,
@@ -270,11 +282,19 @@ function shouldRejectPage(pageUrl: string, title: string, summary: string, text:
 		if (matchesAnyPattern(normalizedUrl, BLOCKED_COMMERCE_URL_PATTERNS)) {
 			return true;
 		}
+
+		if (matchesAnyPattern(normalizedUrl, BLOCKED_STOCK_LANDING_URL_PATTERNS)) {
+			return true;
+		}
 	} catch {
 		return true;
 	}
 
 	if (matchesAnyPattern(combined, BLOCKED_COMMERCE_TEXT_PATTERNS)) {
+		return true;
+	}
+
+	if (matchesAnyPattern(combined, BLOCKED_STOCK_LANDING_TEXT_PATTERNS)) {
 		return true;
 	}
 
@@ -303,6 +323,171 @@ function readMeta($: ReturnType<typeof load>, selectors: string[]) {
 	}
 
 	return '';
+}
+
+function collectJsonLdObjects(value: JsonLdValue, objects: JsonLdObject[]) {
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			collectJsonLdObjects(item, objects);
+		}
+		return;
+	}
+
+	if (!value || typeof value !== 'object') {
+		return;
+	}
+
+	const object = value as JsonLdObject;
+	objects.push(object);
+
+	for (const nestedKey of ['@graph', 'mainEntity', 'mainEntityOfPage', 'itemListElement', 'subjectOf', 'hasPart', 'citation']) {
+		if (nestedKey in object) {
+			collectJsonLdObjects(object[nestedKey], objects);
+		}
+	}
+}
+
+function parseJsonLdBlocks($: ReturnType<typeof load>) {
+	const objects: JsonLdObject[] = [];
+
+	$('script[type="application/ld+json"]').each((_, element) => {
+		const rawValue = $(element).contents().text().trim();
+		if (!rawValue) {
+			return;
+		}
+
+		try {
+			collectJsonLdObjects(JSON.parse(rawValue) as JsonLdValue, objects);
+		} catch {
+			return;
+		}
+	});
+
+	return objects;
+}
+
+function firstJsonLdText(value: JsonLdValue): string {
+	if (typeof value === 'string') {
+		return stripHtml(value.trim());
+	}
+
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			const candidate = firstJsonLdText(item);
+			if (candidate) {
+				return candidate;
+			}
+		}
+		return '';
+	}
+
+	if (!value || typeof value !== 'object') {
+		return '';
+	}
+
+	const object = value as JsonLdObject;
+	for (const key of ['headline', 'name', 'description', 'text', 'articleBody', 'caption']) {
+		const candidate = firstJsonLdText(object[key]);
+		if (candidate) {
+			return candidate;
+		}
+	}
+
+	return '';
+}
+
+function firstJsonLdUrl(value: JsonLdValue, baseUrl: string): string {
+	if (typeof value === 'string') {
+		return toAbsoluteUrl(value.trim(), baseUrl) ?? '';
+	}
+
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			const candidate = firstJsonLdUrl(item, baseUrl);
+			if (candidate) {
+				return candidate;
+			}
+		}
+		return '';
+	}
+
+	if (!value || typeof value !== 'object') {
+		return '';
+	}
+
+	const object = value as JsonLdObject;
+	for (const key of ['url', '@id', 'contentUrl', 'mainEntityOfPage', 'sameAs']) {
+		const candidate = firstJsonLdUrl(object[key], baseUrl);
+		if (candidate) {
+			return candidate;
+		}
+	}
+
+	return '';
+}
+
+function findStructuredText(objects: JsonLdObject[], keys: string[]) {
+	for (const object of objects) {
+		for (const key of keys) {
+			const candidate = firstJsonLdText(object[key]);
+			if (candidate) {
+				return candidate;
+			}
+		}
+	}
+
+	return '';
+}
+
+function findStructuredUrl(objects: JsonLdObject[], keys: string[], baseUrl: string) {
+	for (const object of objects) {
+		for (const key of keys) {
+			const candidate = firstJsonLdUrl(object[key], baseUrl);
+			if (candidate) {
+				return candidate;
+			}
+		}
+	}
+
+	return '';
+}
+
+function collectStructuredUrlsFromValue(value: JsonLdValue, baseUrl: string, urls: Set<string>) {
+	if (typeof value === 'string') {
+		const normalizedUrl = toAbsoluteUrl(value.trim(), baseUrl);
+		if (normalizedUrl) {
+			urls.add(normalizedUrl);
+		}
+		return;
+	}
+
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			collectStructuredUrlsFromValue(item, baseUrl, urls);
+		}
+		return;
+	}
+
+	if (!value || typeof value !== 'object') {
+		return;
+	}
+
+	const object = value as JsonLdObject;
+	for (const [key, nestedValue] of Object.entries(object)) {
+		if (['url', '@id', 'contentUrl', 'mainEntityOfPage', 'sameAs', 'citation', 'mentions', 'subjectOf', 'hasPart', 'item', 'itemListElement', 'encoding'].includes(key)) {
+			collectStructuredUrlsFromValue(nestedValue, baseUrl, urls);
+		}
+	}
+}
+
+function extractStructuredUrls(objects: JsonLdObject[], baseUrl: string) {
+	const urls = new Set<string>();
+
+	for (const object of objects) {
+		collectStructuredUrlsFromValue(object, baseUrl, urls);
+	}
+
+	return [...urls];
 }
 
 function scoreFallbackLink(candidateUrl: string, anchorText: string, pageUrl: string, tokens: string[]) {
@@ -336,7 +521,7 @@ function scoreFallbackLink(candidateUrl: string, anchorText: string, pageUrl: st
 	return score;
 }
 
-function extractFallbackLinks($: ReturnType<typeof load>, pageUrl: string, tokens: string[]) {
+function extractFallbackLinks($: ReturnType<typeof load>, pageUrl: string, tokens: string[], structuredUrls: string[] = []) {
 	const rankedLinks = new Map<string, number>();
 
 	$('a[href]').each((_, element) => {
@@ -359,21 +544,36 @@ function extractFallbackLinks($: ReturnType<typeof load>, pageUrl: string, token
 		}
 	});
 
+	for (const candidateUrl of structuredUrls) {
+		if (candidateUrl === pageUrl || shouldSkipFallbackUrl(candidateUrl)) {
+			continue;
+		}
+
+		const score = scoreFallbackLink(candidateUrl, candidateUrl, pageUrl, tokens);
+		const existing = rankedLinks.get(candidateUrl) ?? Number.NEGATIVE_INFINITY;
+
+		if (score > existing) {
+			rankedLinks.set(candidateUrl, score);
+		}
+	}
+
 	return [...rankedLinks.entries()]
 		.sort((left, right) => right[1] - left[1])
 		.map(([candidateUrl]) => candidateUrl)
 		.slice(0, MAX_ENRICHMENT_LINKS);
 }
 
-function readCanonicalUrl($: ReturnType<typeof load>, pageUrl: string) {
-	const canonical = $('link[rel="canonical"]').attr('href')?.trim() || readMeta($, ['meta[property="og:url"]']);
+function readCanonicalUrl($: ReturnType<typeof load>, pageUrl: string, structuredData: JsonLdObject[]) {
+	const canonical =
+		$('link[rel="canonical"]').attr('href')?.trim() || readMeta($, ['meta[property="og:url"]']) || findStructuredUrl(structuredData, ['mainEntityOfPage', 'url', '@id'], pageUrl);
 
 	return canonical ? (toAbsoluteUrl(canonical, pageUrl) ?? pageUrl) : pageUrl;
 }
 
-function readTitle($: ReturnType<typeof load>) {
+function readTitle($: ReturnType<typeof load>, structuredData: JsonLdObject[]) {
 	return stripHtml(
 		readMeta($, ['meta[property="og:title"]', 'meta[name="twitter:title"]']) ||
+			findStructuredText(structuredData, ['headline', 'name']) ||
 			$('article h1').first().text() ||
 			$('main h1').first().text() ||
 			$('h1').first().text() ||
@@ -381,7 +581,7 @@ function readTitle($: ReturnType<typeof load>) {
 	);
 }
 
-function readSummary($: ReturnType<typeof load>) {
+function readSummary($: ReturnType<typeof load>, structuredData: JsonLdObject[]) {
 	const paragraphs = $('article p, main p, p')
 		.toArray()
 		.map((element) => stripHtml($(element).text()))
@@ -390,6 +590,7 @@ function readSummary($: ReturnType<typeof load>) {
 	return truncate(
 		stripHtml(
 			readMeta($, ['meta[name="description"]', 'meta[property="og:description"]', 'meta[name="twitter:description"]']) ||
+				findStructuredText(structuredData, ['description', 'abstract']) ||
 				paragraphs[0] ||
 				$('article p').slice(0, 3).text() ||
 				$('main p').slice(0, 3).text() ||
@@ -399,9 +600,10 @@ function readSummary($: ReturnType<typeof load>) {
 	);
 }
 
-function readImageUrl($: ReturnType<typeof load>, pageUrl: string) {
+function readImageUrl($: ReturnType<typeof load>, pageUrl: string, structuredData: JsonLdObject[]) {
 	const candidates = [
 		readMeta($, ['meta[property="og:image"]', 'meta[name="twitter:image"]']),
+		findStructuredUrl(structuredData, ['image', 'thumbnailUrl'], pageUrl),
 		$('article img').first().attr('src') || '',
 		$('main img').first().attr('src') || '',
 		$('img').first().attr('src') || '',
@@ -417,7 +619,7 @@ function readImageUrl($: ReturnType<typeof load>, pageUrl: string) {
 	return undefined;
 }
 
-function readPublishedAt($: ReturnType<typeof load>) {
+function readPublishedAt($: ReturnType<typeof load>, structuredData: JsonLdObject[]) {
 	return toIsoDate(
 		readMeta($, [
 			'meta[property="article:published_time"]',
@@ -427,13 +629,18 @@ function readPublishedAt($: ReturnType<typeof load>) {
 			'meta[name="date"]',
 			'meta[name="dc.date"]',
 			'time[datetime]',
-		]),
+		]) || findStructuredText(structuredData, ['datePublished', 'dateModified', 'dateCreated']),
 	);
 }
 
-function readBodyText($: ReturnType<typeof load>) {
+function readBodyText($: ReturnType<typeof load>, structuredData: JsonLdObject[]) {
 	const workingRoot = load($.html());
 	workingRoot(NOISE_SELECTORS.join(',')).remove();
+	const structuredBodyText = truncate(findStructuredText(structuredData, ['articleBody', 'text']), MAX_TEXT_LENGTH);
+
+	if (structuredBodyText.length >= MIN_BODY_CHARS) {
+		return structuredBodyText;
+	}
 
 	const preferredSections = [
 		'article [itemprop="articleBody"]',
@@ -456,7 +663,7 @@ function readBodyText($: ReturnType<typeof load>) {
 		}
 	}
 
-	return truncate(stripHtml(workingRoot('body').text()), MAX_TEXT_LENGTH);
+	return truncate(stripHtml(workingRoot('body').text()) || structuredBodyText, MAX_TEXT_LENGTH);
 }
 
 function scoreTextMatch(text: string, tokens: string[], weight: number) {
@@ -514,7 +721,7 @@ function scorePage(pageUrl: string, title: string, summary: string, text: string
 	return score;
 }
 
-function extractLinks($: ReturnType<typeof load>, pageUrl: string, sameDomainOnly: boolean) {
+function extractLinks($: ReturnType<typeof load>, pageUrl: string, sameDomainOnly: boolean, structuredUrls: string[] = []) {
 	const baseHost = normalizeHost(new URL(pageUrl).hostname);
 	const allowOffsiteLinks = !sameDomainOnly || canFollowOffsiteLinks(pageUrl);
 	const links: string[] = [];
@@ -541,12 +748,30 @@ function extractLinks($: ReturnType<typeof load>, pageUrl: string, sameDomainOnl
 		links.push(nextUrl);
 	});
 
+	for (const candidateUrl of structuredUrls) {
+		if (links.length >= MAX_LINKS_PER_PAGE) {
+			break;
+		}
+
+		if (candidateUrl === pageUrl || links.includes(candidateUrl) || shouldSkipUrl(candidateUrl)) {
+			continue;
+		}
+
+		if (!allowOffsiteLinks && normalizeHost(new URL(candidateUrl).hostname) !== baseHost) {
+			continue;
+		}
+
+		links.push(candidateUrl);
+	}
+
 	return links;
 }
 
 function extractPage(html: string, pageUrl: string, source: FeedSourceConfig, tokens: string[], discoverySource?: FeedItem['discoverySource']): ExtractedPage | null {
 	const $ = load(html);
-	const canonicalUrl = readCanonicalUrl($, pageUrl);
+	const structuredData = parseJsonLdBlocks($);
+	const canonicalUrl = readCanonicalUrl($, pageUrl, structuredData);
+	const structuredUrls = extractStructuredUrls(structuredData, canonicalUrl);
 
 	if (isSearchDiscoveryUrl(canonicalUrl)) {
 		const aiSnippet = extractAiSearchSnippet($, canonicalUrl);
@@ -573,16 +798,16 @@ function extractPage(html: string, pageUrl: string, source: FeedSourceConfig, to
 		return null;
 	}
 
-	const title = readTitle($);
-	const summary = readSummary($);
-	const text = readBodyText($);
+	const title = readTitle($, structuredData);
+	const summary = readSummary($, structuredData);
+	const text = readBodyText($, structuredData);
 	const articleLike = Boolean($('article').length || $('[itemprop="articleBody"]').length || $('meta[property="article:published_time"]').length || $('time[datetime]').length);
 
 	if (!title || !text) {
 		return null;
 	}
 
-	const publishedAt = readPublishedAt($);
+	const publishedAt = readPublishedAt($, structuredData);
 	if (shouldRejectPage(canonicalUrl, title, summary, text, publishedAt)) {
 		return null;
 	}
@@ -594,10 +819,10 @@ function extractPage(html: string, pageUrl: string, source: FeedSourceConfig, to
 		url: canonicalUrl,
 		summary,
 		publishedAt,
-		imageUrl: readImageUrl($, canonicalUrl),
+		imageUrl: readImageUrl($, canonicalUrl, structuredData),
 		text,
-		links: extractLinks($, canonicalUrl, source.sameDomainOnly ?? true),
-		fallbackLinks: extractFallbackLinks($, canonicalUrl, tokens),
+		links: extractLinks($, canonicalUrl, source.sameDomainOnly ?? true, structuredUrls),
+		fallbackLinks: extractFallbackLinks($, canonicalUrl, tokens, structuredUrls),
 		score,
 		articleLike,
 		discoverySource,
@@ -717,7 +942,7 @@ async function fetchFallbackCandidatesFromPage(pageUrl: string, source: FeedSour
 		const html = await response.text();
 		const finalUrl = response.url || pageUrl;
 		const $ = load(html);
-		return extractFallbackLinks($, finalUrl, tokens);
+		return extractFallbackLinks($, finalUrl, tokens, extractStructuredUrls(parseJsonLdBlocks($), finalUrl));
 	} catch {
 		return [];
 	}
@@ -854,8 +1079,8 @@ function mapScrapyPage(page: ScrapyPage, source: FeedSourceConfig, tokens: strin
 
 async function crawlWithScrapy(source: FeedSourceConfig, tokens: string[]) {
 	const seedUrls = source.seedUrls?.filter(Boolean) ?? [];
-	const maxPages = Math.max(1, Math.min(source.crawlMaxPages ?? DEFAULT_MAX_PAGES, 80));
-	const crawlDepth = Math.max(0, Math.min(source.crawlDepth ?? DEFAULT_CRAWL_DEPTH, 2));
+	const maxPages = Math.max(1, Math.min(source.crawlMaxPages ?? DEFAULT_MAX_PAGES, 100));
+	const crawlDepth = Math.max(0, Math.min(source.crawlDepth ?? DEFAULT_CRAWL_DEPTH, 5));
 	const matches: ExtractedPage[] = [];
 
 	for (const seedUrl of seedUrls) {
@@ -895,8 +1120,8 @@ async function crawlWithCheerio(source: FeedSourceConfig, tokens: string[]) {
 		discoverySource: classifyDiscoverySource(url),
 	}));
 	const matches: ExtractedPage[] = [];
-	const maxPages = Math.max(1, Math.min(source.crawlMaxPages ?? DEFAULT_MAX_PAGES, 80));
-	const crawlDepth = Math.max(0, Math.min(source.crawlDepth ?? DEFAULT_CRAWL_DEPTH, 2));
+	const maxPages = Math.max(1, Math.min(source.crawlMaxPages ?? DEFAULT_MAX_PAGES, 100));
+	const crawlDepth = Math.max(0, Math.min(source.crawlDepth ?? DEFAULT_CRAWL_DEPTH, 5));
 	let crawledCount = 0;
 
 	while (queue.length > 0 && crawledCount < maxPages) {

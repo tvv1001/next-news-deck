@@ -83,7 +83,7 @@ export function NewsDeck() {
 		() => orderedColumns.filter((column) => visibleColumnIds.includes(column.id)).map((column) => column.id),
 		[orderedColumns, visibleColumnIds],
 	);
-	const { data, error, isLoading, isRefreshing, loadingColumnIds, refresh } = useFeedStream(prioritizedColumnIds);
+	const { data, error, isLiveConnected, isLoading, isRefreshing, loadingColumnIds, refresh } = useFeedStream(prioritizedColumnIds);
 	const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
 	const isHydrated = useHydrated();
 	const sourceData = useMemo(() => mergeSourceData(data?.sources), [data]);
@@ -115,6 +115,12 @@ export function NewsDeck() {
 						<span className='rounded-full border border-white/10 bg-white/5 px-2 py-1 font-medium text-cyan-100'>{formatRelativeTime(data?.generatedAt ?? null)}</span>
 						<span className='rounded-full border border-white/10 bg-white/5 px-2 py-1'>
 							cache <span className='font-semibold text-cyan-200'>{data?.cacheMode ?? 'memory'}</span>
+						</span>
+						<span
+							className={`rounded-full border px-2 py-1 font-medium ${
+								isLiveConnected ? 'border-emerald-400/30 bg-emerald-500/10 text-emerald-100' : 'border-amber-400/30 bg-amber-500/10 text-amber-100'
+							}`}>
+							{isLiveConnected ? 'live updates on' : 'live reconnecting'}
 						</span>
 						<button
 							type='button'
