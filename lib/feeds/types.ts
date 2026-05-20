@@ -1,6 +1,7 @@
-export type FeedSourceKind = 'rss' | 'reddit';
+export type FeedSourceKind = 'rss' | 'reddit' | 'web-crawl';
 export type FeedVelocity = 'fast' | 'slow';
 export type CacheMode = 'memory' | 'redis';
+export type FeedSourceCrawlEngine = 'cheerio' | 'scrapy';
 
 export interface FeedItem {
 	id: string;
@@ -29,6 +30,12 @@ export interface FeedSourceConfig {
 	maxItems: number;
 	tags: string[];
 	userAgent?: string;
+	query?: string;
+	seedUrls?: string[];
+	crawlDepth?: number;
+	crawlMaxPages?: number;
+	sameDomainOnly?: boolean;
+	crawlEngine?: FeedSourceCrawlEngine;
 }
 
 export interface FeedColumnConfig {
@@ -37,6 +44,8 @@ export interface FeedColumnConfig {
 	description: string;
 	velocity: FeedVelocity;
 	sourceIds: string[];
+	tagLabel?: string;
+	filterTags?: string[];
 	maxItems: number;
 	accentFrom: string;
 	accentTo: string;

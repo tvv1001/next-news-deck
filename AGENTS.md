@@ -6,7 +6,7 @@ This repo uses Next.js 16 with App Router. APIs, conventions, and file structure
 
 ## Product context
 
-- Build and maintain a TweetDeck-style news dashboard for RSS and Reddit sources.
+- Build and maintain a TweetDeck-style news dashboard for RSS, Reddit, and a focused free crawl watch lane.
 - Prefer practical, legal, server-mediated integrations over browser-side scraping.
 - Keep the UI compact, fullscreen, and dashboard-like.
 
@@ -16,6 +16,7 @@ This repo uses Next.js 16 with App Router. APIs, conventions, and file structure
 - Treat `lib/feeds/types.ts` as the source of truth for feed item, source, and column shapes.
 - Keep Redis optional. The app must continue to work with memory cache only.
 - Extend feed behavior through `lib/feeds/*`, `lib/config/default-columns.ts`, and the internal API routes before adding ad hoc client logic.
+- Keep the crawler surface area small: `lib/feeds/web-crawl.ts`, `lib/crawler/scrapy-runner.ts`, and `lib/crawler/scrapy_crawler.py` are the only crawler pieces that should remain active.
 
 ## UI and interaction rules
 
@@ -29,10 +30,11 @@ This repo uses Next.js 16 with App Router. APIs, conventions, and file structure
 
 - Make focused edits that preserve the current visual style and internal API boundaries.
 - Prefer small extensions to existing hooks and dashboard components over parallel implementations.
+- Remove dead code when it is clearly unused instead of leaving alternate paths behind.
 - Update `README.md` when user-facing capabilities, setup, or architecture assumptions change.
 
 ## Validation
 
-- After non-trivial code changes, run `npm run lint`, `npm run typecheck`, and `npm run build`.
+- After non-trivial code changes, run `pnpm lint`, `pnpm typecheck`, and `pnpm build`.
 - If you touch layout or drag/drop behavior, verify that the deck still hydrates cleanly and that only columns scroll vertically.
 <!-- END:nextjs-agent-rules -->

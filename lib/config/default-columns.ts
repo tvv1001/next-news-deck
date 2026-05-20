@@ -1,5 +1,8 @@
 import { FeedColumnConfig, FeedSourceConfig } from '@/lib/feeds/types';
 
+export const PINNED_RIGHT_COLUMN_ID = 'ticker-watch';
+export const RESERVED_CUSTOM_SOURCE_IDS = ['watch-tsla-web'] as const;
+
 export const defaultFeedSources: FeedSourceConfig[] = [
 	{
 		id: 'bbc-world',
@@ -78,6 +81,31 @@ export const defaultFeedSources: FeedSourceConfig[] = [
 		maxItems: 15,
 		tags: ['reddit', 'programming'],
 	},
+	{
+		id: 'watch-tsla-web',
+		kind: 'web-crawl',
+		title: 'TSLA Web Watch',
+		description: 'Free keyword-driven crawl of public TSLA/Tesla news pages using the reusable crawler bridge.',
+		siteUrl: 'https://finance.yahoo.com/quote/TSLA/',
+		feedUrl: 'https://finance.yahoo.com/quote/TSLA/',
+		pollMinutes: 45,
+		maxItems: 12,
+		tags: ['watch', 'markets', 'tsla', 'tesla'],
+		query: '$TSLA',
+		crawlEngine: 'scrapy',
+		seedUrls: [
+			'https://electrek.co/guides/tesla/',
+			'https://insideevs.com/tesla/',
+			'https://www.teslarati.com/',
+			'https://finance.yahoo.com/quote/TSLA/',
+			'https://www.cnbc.com/quotes/TSLA',
+			'https://www.sec.gov/edgar/browse/?CIK=1318605&owner=exclude',
+			'https://ir.tesla.com/',
+		],
+		crawlDepth: 1,
+		crawlMaxPages: 18,
+		sameDomainOnly: true,
+	},
 ];
 
 export const defaultFeedColumns: FeedColumnConfig[] = [
@@ -97,6 +125,8 @@ export const defaultFeedColumns: FeedColumnConfig[] = [
 		description: 'Product launches, startup news, and tech policy.',
 		velocity: 'fast',
 		sourceIds: ['techcrunch', 'verge'],
+		tagLabel: 'Tech',
+		filterTags: ['tech'],
 		maxItems: 24,
 		accentFrom: 'from-violet-500/25',
 		accentTo: 'to-fuchsia-400/10',
@@ -107,9 +137,23 @@ export const defaultFeedColumns: FeedColumnConfig[] = [
 		description: 'Community-driven links from Reddit feeds.',
 		velocity: 'slow',
 		sourceIds: ['reddit-worldnews', 'reddit-technology', 'reddit-programming'],
+		tagLabel: 'Reddit',
+		filterTags: ['reddit'],
 		maxItems: 24,
 		accentFrom: 'from-amber-500/25',
 		accentTo: 'to-orange-400/10',
+	},
+	{
+		id: PINNED_RIGHT_COLUMN_ID,
+		title: 'Crawl Watch',
+		description: 'Slow-lane free crawler results for tracked $TSLA chatter.',
+		velocity: 'slow',
+		sourceIds: ['watch-tsla-web'],
+		tagLabel: '$TSLA',
+		filterTags: ['tsla'],
+		maxItems: 18,
+		accentFrom: 'from-emerald-500/25',
+		accentTo: 'to-teal-400/10',
 	},
 ];
 

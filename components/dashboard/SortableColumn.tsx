@@ -4,6 +4,7 @@ import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
 import { FeedColumn } from '@/components/dashboard/FeedColumn';
+import { PINNED_RIGHT_COLUMN_ID } from '@/lib/config/default-columns';
 import { FeedColumnData } from '@/lib/feeds/types';
 
 interface SortableColumnProps {
@@ -16,7 +17,8 @@ interface SortableColumnProps {
 }
 
 export function SortableColumn({ column, isLoading, readItemIds, onOpenItem, onToggleRead, onRemoveCustomColumn }: SortableColumnProps) {
-	const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: column.id });
+	const isPinnedRight = column.id === PINNED_RIGHT_COLUMN_ID;
+	const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: column.id, disabled: isPinnedRight });
 	const style = {
 		transform: CSS.Transform.toString(transform),
 		transition,
@@ -36,6 +38,9 @@ export function SortableColumn({ column, isLoading, readItemIds, onOpenItem, onT
 				onToggleRead={onToggleRead}
 				headerActions={
 					<div className='flex items-center justify-end gap-2'>
+						{isPinnedRight ?
+							<span className='rounded-full border border-emerald-300/20 px-3 py-1 text-xs font-medium text-emerald-100/85'>Pinned right</span>
+						:	null}
 						{isCustom ?
 							<button
 								type='button'
@@ -44,14 +49,16 @@ export function SortableColumn({ column, isLoading, readItemIds, onOpenItem, onT
 								Remove
 							</button>
 						:	null}
-						<button
-							type='button'
-							className='cursor-grab rounded-full border border-white/15 px-3 py-1 text-xs font-medium text-slate-100 transition hover:border-cyan-300/40 hover:text-cyan-100 active:cursor-grabbing'
-							aria-label={`Drag ${column.title}`}
-							{...attributes}
-							{...listeners}>
-							Drag
-						</button>
+						{isPinnedRight ? null : (
+							<button
+								type='button'
+								className='cursor-grab rounded-full border border-white/15 px-3 py-1 text-xs font-medium text-slate-100 transition hover:border-cyan-300/40 hover:text-cyan-100 active:cursor-grabbing'
+								aria-label={`Drag ${column.title}`}
+								{...attributes}
+								{...listeners}>
+								Drag
+							</button>
+						)}
 					</div>
 				}
 			/>

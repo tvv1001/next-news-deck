@@ -5,9 +5,19 @@ export function buildSourceDataMap(sources: FeedSourceData[]) {
 	return new Map(sources.map((source) => [source.id, source]));
 }
 
+function filterItemsByTags(column: FeedColumnConfig, sources: FeedSourceData[]) {
+	const filters = column.filterTags?.map((tag) => tag.trim().toLowerCase()).filter(Boolean) ?? [];
+
+	if (filters.length === 0) {
+		return sources.flatMap((source) => source.items);
+	}
+
+	return sources.flatMap((source) => source.items.filter((item) => item.tags.some((tag) => filters.includes(tag.toLowerCase()))));
+}
+
 export function buildColumnData(column: FeedColumnConfig, sourceMap: Map<string, FeedSourceData>): FeedColumnData {
 	const linkedSources = column.sourceIds.map((sourceId) => sourceMap.get(sourceId)).filter((source): source is FeedSourceData => Boolean(source));
-	const items = dedupeAndSortFeedItems(linkedSources.flatMap((source) => source.items)).slice(0, column.maxItems);
+	const items = dedupeAndSortFeedItems(filterItemsByTags(column, linkedSources)).slice(0, column.maxItems);
 	const sourceStatuses = linkedSources.map((source) => ({
 		sourceId: source.id,
 		title: source.title,

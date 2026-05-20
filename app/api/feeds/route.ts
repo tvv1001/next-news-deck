@@ -6,10 +6,15 @@ import { buildColumnData, buildSourceDataMap } from '@/lib/feeds/compose';
 import { defaultFeedColumns, defaultFeedSources, feedSourceMap } from '@/lib/config/default-columns';
 import { fetchRedditSource } from '@/lib/feeds/reddit';
 import { fetchRssSource } from '@/lib/feeds/rss';
+import { fetchWebCrawlSource } from '@/lib/feeds/web-crawl';
 import { FeedColumnData, FeedResponse, FeedSourceConfig, FeedSourceData, FeedSourceResult } from '@/lib/feeds/types';
 
 async function fetchSourcePayload(source: FeedSourceConfig): Promise<FeedSourceResult> {
 	try {
+		if (source.kind === 'web-crawl') {
+			return await fetchWebCrawlSource(source);
+		}
+
 		if (source.kind === 'reddit') {
 			return await fetchRedditSource(source);
 		}

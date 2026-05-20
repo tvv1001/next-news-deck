@@ -6,7 +6,7 @@ argument-hint: 'Describe the feature, fix, refactor, or documentation update for
 user-invocable: true
 ---
 
-You are the project specialist for `next-news-deck`, a fullscreen TweetDeck-style RSS and Reddit dashboard built with Next.js 16, React 19, TypeScript, Tailwind v4, `@dnd-kit`, and `@tanstack/react-virtual`.
+You are the project specialist for `next-news-deck`, a fullscreen TweetDeck-style RSS, Reddit, and focused crawl-watch dashboard built with Next.js 16, React 19, TypeScript, Tailwind v4, `@dnd-kit`, and `@tanstack/react-virtual`.
 
 Your job is to make safe, repo-aware changes that fit the existing architecture and UX.
 
@@ -32,6 +32,7 @@ Your job is to make safe, repo-aware changes that fit the existing architecture 
 - `app/api/health/route.ts` — cache and service health
 - `lib/config/default-columns.ts` — default sources and starter columns
 - `lib/feeds/*` — feed adapters, composition, normalization, shared types
+- `lib/crawler/scrapy-runner.ts` + `lib/crawler/scrapy_crawler.py` — minimal crawler bridge used by the watch lane
 - `hooks/useFeedStream.ts` — feed polling
 - `hooks/useColumnState.ts` — persisted column state and read state
 - `components/dashboard/*` — deck shell, composer, columns, cards, sortable wrappers
@@ -42,9 +43,9 @@ Your job is to make safe, repo-aware changes that fit the existing architecture 
 2. Prefer existing patterns over introducing parallel abstractions.
 3. If a change affects layout, preserve internal-only column scrolling and compact top controls.
 4. If a change affects drag/drop, verify hydration safety and sortable behavior.
-5. If a change affects feed logic, keep normalization and composition server-first.
+5. If a change affects feed logic, keep normalization and composition server-first, and do not reintroduce removed legacy crawler/search bundles.
 6. Update `README.md` when setup, architecture, or user-facing behavior changes.
-7. Run `npm run lint`, `npm run typecheck`, and `npm run build` after non-trivial code changes.
+7. Run `pnpm lint`, `pnpm typecheck`, and `pnpm build` after non-trivial code changes.
 
 ## Output expectations
 

@@ -33,6 +33,11 @@ export function FeedColumn({ column, isLoading, readItemIds, onOpenItem, onToggl
 					<div>
 						<p className='text-[10px] font-semibold uppercase tracking-[0.24em] text-cyan-100/90'>{column.velocity === 'fast' ? 'Fast lane' : 'Watch lane'}</p>
 						<h2 className='mt-1 text-base font-semibold text-white'>{column.title}</h2>
+						{column.tagLabel ?
+							<p className='mt-2 inline-flex rounded-full border border-white/15 bg-white/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.18em] text-white/90'>
+								#{column.tagLabel}
+							</p>
+						:	null}
 					</div>
 					<div className='flex flex-col items-end gap-2'>
 						{headerActions}
@@ -76,6 +81,7 @@ export function FeedColumn({ column, isLoading, readItemIds, onOpenItem, onToggl
 							return (
 								<div
 									key={virtualItem.key}
+									data-index={virtualItem.index}
 									ref={virtualizer.measureElement}
 									className='absolute left-0 top-0 w-full pb-4'
 									style={{

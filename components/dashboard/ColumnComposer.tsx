@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react';
 
+import { PINNED_RIGHT_COLUMN_ID, RESERVED_CUSTOM_SOURCE_IDS } from '@/lib/config/default-columns';
 import { FeedColumnConfig, FeedSourceConfig, FeedVelocity } from '@/lib/feeds/types';
 
 interface ColumnComposerProps {
@@ -40,6 +41,10 @@ export function ColumnComposer({ availableSources, columns, visibleColumnIds, on
 	const [formError, setFormError] = useState<string | null>(null);
 
 	const customColumnCount = useMemo(() => columns.filter((column) => column.id.startsWith('custom-')).length, [columns]);
+	const selectableSources = useMemo(
+		() => availableSources.filter((source) => !RESERVED_CUSTOM_SOURCE_IDS.includes(source.id as (typeof RESERVED_CUSTOM_SOURCE_IDS)[number])),
+		[availableSources],
+	);
 
 	function resetForm() {
 		setTitle('');
@@ -66,7 +71,7 @@ export function ColumnComposer({ availableSources, columns, visibleColumnIds, on
 		}
 
 		if (selectedSourceIds.length === 0) {
-			setFormError('Choose at least one source for the custom column.');
+			setFormError('Choose at least one non-crawl source for the custom column.');
 			return;
 		}
 
@@ -106,6 +111,7 @@ export function ColumnComposer({ availableSources, columns, visibleColumnIds, on
 				{columns.map((column) => {
 					const isVisible = visibleColumnIds.includes(column.id);
 					const isCustom = column.id.startsWith('custom-');
+					const isPinnedRight = column.id === PINNED_RIGHT_COLUMN_ID;
 
 					return (
 						<div
@@ -114,9 +120,17 @@ export function ColumnComposer({ availableSources, columns, visibleColumnIds, on
 							<button
 								type='button'
 								onClick={() => onToggleColumn(column.id)}
-								className={`text-[11px] font-medium transition ${isVisible ? 'text-cyan-100' : 'text-slate-400 hover:text-white'}`}>
+								disabled={isPinnedRight}
+								className={`text-[11px] font-medium transition ${
+									isPinnedRight ? 'text-emerald-100/90'
+									: isVisible ? 'text-cyan-100'
+									: 'text-slate-400 hover:text-white'
+								}`}>
 								{column.title}
 							</button>
+							{isPinnedRight ?
+								<span className='text-[10px] text-emerald-200/80'>Right</span>
+							:	null}
 							{isCustom ?
 								<button
 									type='button'
@@ -204,7 +218,7 @@ export function ColumnComposer({ availableSources, columns, visibleColumnIds, on
 					<div>
 						<p className='mb-1.5 text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-400'>Sources</p>
 						<div className='grid max-h-52 gap-2 overflow-y-auto rounded-xl border border-white/10 bg-slate-900/80 p-2'>
-							{availableSources.map((source) => {
+							{selectableSources.map((source) => {
 								const isSelected = selectedSourceIds.includes(source.id);
 
 								return (
@@ -233,7 +247,7 @@ export function ColumnComposer({ availableSources, columns, visibleColumnIds, on
 						<div>
 							{formError ?
 								<p className='text-xs text-rose-200'>{formError}</p>
-							:	<p className='text-[11px] text-slate-400'>Pick sources to blend into one extra column.</p>}
+							:	<p className='text-[11px] text-slate-400'>Pick sources to blend into one extra column. Crawl search stays pinned in the right lane.</p>}
 						</div>
 						<div className='flex gap-2'>
 							<button

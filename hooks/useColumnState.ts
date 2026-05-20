@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 
+import { PINNED_RIGHT_COLUMN_ID, RESERVED_CUSTOM_SOURCE_IDS } from '@/lib/config/default-columns';
 import { FeedColumnConfig } from '@/lib/feeds/types';
 
 const STORAGE_KEY = 'next-news-deck-ui-state:v1';
@@ -34,7 +35,22 @@ function isFeedColumnConfig(value: unknown): value is FeedColumnConfig {
 
 function normalizeOrderedIds(allColumnIds: string[], orderedIds: string[]) {
 	const orderedSet = new Set(orderedIds.filter((id) => allColumnIds.includes(id)));
-	return [...orderedSet, ...allColumnIds.filter((id) => !orderedSet.has(id))];
+	const normalized = [...orderedSet, ...allColumnIds.filter((id) => !orderedSet.has(id))];
+
+	if (!normalized.includes(PINNED_RIGHT_COLUMN_ID)) {
+		return normalized;
+	}
+
+	return [...normalized.filter((id) => id !== PINNED_RIGHT_COLUMN_ID), PINNED_RIGHT_COLUMN_ID];
+}
+
+function sanitizeCustomColumn(column: FeedColumnConfig) {
+	const sourceIds = column.sourceIds.filter((sourceId) => !RESERVED_CUSTOM_SOURCE_IDS.includes(sourceId as (typeof RESERVED_CUSTOM_SOURCE_IDS)[number]));
+
+	return {
+		...column,
+		sourceIds,
+	};
 }
 
 export function useColumnState(defaultColumns: FeedColumnConfig[]) {
@@ -63,12 +79,16 @@ export function useColumnState(defaultColumns: FeedColumnConfig[]) {
 			}
 
 			const parsed = JSON.parse(rawValue) as Partial<PersistedColumnState>;
-			const nextCustomColumns = parsed.customColumns?.filter(isFeedColumnConfig) ?? [];
+			const nextCustomColumns =
+				parsed.customColumns
+					?.filter(isFeedColumnConfig)
+					.map(sanitizeCustomColumn)
+					.filter((column) => column.sourceIds.length > 0) ?? [];
 			const nextAllColumnIds = [...defaultColumnIds, ...nextCustomColumns.map((column) => column.id)];
 			const nextVisibleIds = parsed.visibleColumnIds?.filter((id) => nextAllColumnIds.includes(id));
 			const nextOrderedIds = normalizeOrderedIds(nextAllColumnIds, parsed.orderedColumnIds ?? nextVisibleIds ?? defaultColumnIds);
-			const nextHiddenIds = (parsed.hiddenColumnIds ?? nextAllColumnIds.filter((id) => !(nextVisibleIds ?? defaultColumnIds).includes(id))).filter((id) =>
-				nextAllColumnIds.includes(id),
+			const nextHiddenIds = (parsed.hiddenColumnIds ?? nextAllColumnIds.filter((id) => !(nextVisibleIds ?? defaultColumnIds).includes(id))).filter(
+				(id) => nextAllColumnIds.includes(id) && id !== PINNED_RIGHT_COLUMN_ID,
 			);
 			const nextReadIds = parsed.readItemIds?.filter(Boolean) ?? [];
 
@@ -123,6 +143,10 @@ export function useColumnState(defaultColumns: FeedColumnConfig[]) {
 	const readIdSet = useMemo(() => new Set(readItemIds), [readItemIds]);
 
 	function toggleColumn(columnId: string) {
+		if (columnId === PINNED_RIGHT_COLUMN_ID) {
+			return;
+		}
+
 		setHiddenColumnIds((current) => {
 			if (current.includes(columnId)) {
 				return current.filter((id) => id !== columnId);
@@ -139,8 +163,19 @@ export function useColumnState(defaultColumns: FeedColumnConfig[]) {
 	}
 
 	function addCustomColumn(column: FeedColumnConfig) {
-		setCustomColumns((current) => [...current, column]);
-		setOrderedColumnIds((current) => [...current, column.id]);
+		const sanitizedColumn = sanitizeCustomColumn(column);
+		if (sanitizedColumn.sourceIds.length === 0) {
+			return;
+		}
+
+		setCustomColumns((current) => [...current, sanitizedColumn]);
+		setOrderedColumnIds((current) => {
+			const normalized = normalizeOrderedIds(allColumnIds, current);
+			const insertIndex = normalized.includes(PINNED_RIGHT_COLUMN_ID) ? normalized.indexOf(PINNED_RIGHT_COLUMN_ID) : normalized.length;
+			const nextOrder = [...normalized];
+			nextOrder.splice(insertIndex, 0, sanitizedColumn.id);
+			return nextOrder;
+		});
 		setHiddenColumnIds((current) => current.filter((id) => id !== column.id));
 	}
 
@@ -151,7 +186,7 @@ export function useColumnState(defaultColumns: FeedColumnConfig[]) {
 	}
 
 	function reorderColumns(activeId: string, overId: string) {
-		if (activeId === overId) {
+		if (activeId === overId || activeId === PINNED_RIGHT_COLUMN_ID) {
 			return;
 		}
 
