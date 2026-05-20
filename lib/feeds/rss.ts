@@ -2,12 +2,14 @@ import Parser from 'rss-parser';
 
 import { fetchArticleText } from '@/lib/feeds/article-content';
 import { normalizeFeedItem, type ParsedFeedItem, truncate } from '@/lib/feeds/normalize';
+import { DomainRateLimiter } from '@/lib/feeds/domain-rate-limiter';
 import { FeedItem, FeedSourceConfig, FeedSourceResult } from '@/lib/feeds/types';
 
 const parser = new Parser<Record<string, never>, ParsedFeedItem>();
 const DEFAULT_ARTICLE_TIMEOUT_MS = 8_000;
 const DEFAULT_MIN_CONTENT_CHARS = 360;
 const DEFAULT_CONCURRENCY = 4;
+const RATE_LIMITER = new DomainRateLimiter(300, 2);
 
 function buildHeaders(source: FeedSourceConfig): HeadersInit {
 	return {
@@ -55,15 +57,25 @@ async function enrichRssItemsWithContent(items: FeedItem[], source: FeedSourceCo
 	const headers = buildArticleHeaders(source);
 
 	const enriched = await mapWithConcurrency(items, concurrency, async (item) => {
-		const articleText = await fetchArticleText(item.url, headers, timeoutMs);
-		const content = articleText || item.content || '';
-		const summary = content ? truncate(content, 220) : item.summary;
+		// Respect per-domain rate limiting
+		await RATE_LIMITER.waitForSlot(item.url);
 
-		return {
-			...item,
-			content,
-			summary,
-		};
+		try {
+			const result = await fetchArticleText(item.url, headers, timeoutMs);
+			const { text: articleText, metadata } = result;
+			const content = articleText || item.content || '';
+			const summary = content ? truncate(content, 220) : item.summary;
+
+			return {
+				...item,
+				content,
+				summary,
+				author: metadata.author || item.author,
+				// Store lightweight metadata without bloating the item
+			};
+		} finally {
+			RATE_LIMITER.release(item.url);
+		}
 	});
 
 	return enriched.filter((item) => (item.content?.length ?? 0) >= minContentChars);

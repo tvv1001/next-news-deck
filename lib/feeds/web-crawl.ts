@@ -25,7 +25,7 @@ interface ExtractedPage {
 }
 
 const DEFAULT_MAX_PAGES = 18;
-const DEFAULT_CRAWL_DEPTH = 1;
+const DEFAULT_CRAWL_DEPTH = 2; // Increased from 1 for deeper crawl
 const DEFAULT_MAX_ITEMS_PER_DOMAIN = 5;
 const MAX_LINKS_PER_PAGE = 50;
 const MAX_ENRICHMENT_LINKS = 6;
@@ -33,6 +33,13 @@ const MAX_TEXT_LENGTH = 12_000;
 const MIN_BODY_CHARS = 280;
 const THIN_PAGE_TEXT_CHARS = 900;
 const SEARCH_DISCOVERY_MIN_PAGES = 12;
+
+// Domain-level rate limiting (ms between requests per domain)
+const DOMAIN_REQUEST_DELAY_MS = 300;
+// Max concurrent domain crawls (to prevent resource exhaustion)
+const MAX_CONCURRENT_DOMAINS = 2;
+// Max requests per domain per crawl session
+const MAX_REQUESTS_PER_DOMAIN = 8;
 const NOISE_SELECTORS = [
 	'script',
 	'style',

@@ -74,6 +74,136 @@ const MIN_PARAGRAPH_CHARS = 40;
 
 type CheerioElement = Parameters<ReturnType<typeof load>>[0];
 
+export interface ArticleMetadata {
+	title?: string;
+	author?: string;
+	publishedDate?: string;
+	category?: string;
+	linkedDocuments?: Array<{ url: string; title: string; isPdf: boolean }>;
+}
+
+/**
+ * Detects PDF links and other document references in article content.
+ * Limited to avoid performance degradation.
+ */
+function detectLinkedDocuments(html: string): ArticleMetadata['linkedDocuments'] {
+	const $ = load(html);
+	const docs: ArticleMetadata['linkedDocuments'] = [];
+	const seen = new Set<string>();
+
+	// Scan for PDF links and research documents
+	$('a[href]')
+		.slice(0, 20)
+		.each((_, elem) => {
+			const href = $(elem).attr('href');
+			const title = $(elem).text().trim();
+
+			if (!href || !title || seen.has(href)) {
+				return;
+			}
+
+			try {
+				const url = new URL(href, 'https://example.com');
+				const isPdf = /\.pdf/i.test(url.pathname);
+				const isDocLink = /\b(document|paper|filing|report|whitepaper|research|pdf|download)\b/i.test(title);
+
+				if ((isPdf || isDocLink) && url.protocol.startsWith('http')) {
+					seen.add(href);
+					docs.push({
+						url: href,
+						title,
+						isPdf,
+					});
+				}
+			} catch {
+				// Skip invalid URLs
+			}
+		});
+
+	return docs.length > 0 ? docs : undefined;
+}
+
+/**
+ * Extract author from meta tags or byline elements.
+ * Site-specific patterns for BBC, Reuters, NPR, Guardian, etc.
+ */
+function extractAuthor(html: string): string | undefined {
+	const $ = load(html);
+	const selectors = [
+		'meta[name="author"]',
+		'meta[property="article:author"]',
+		'*[rel="author"]',
+		'.byline',
+		'.by-line',
+		'.author',
+		'.writer',
+		'[data-testid="byline"]', // BBC
+		'.sc-4fedabbc-5', // BBC News specific
+		'.article-byline',
+		'span.author',
+		'p.author',
+	];
+
+	for (const selector of selectors) {
+		const el = $(selector).first();
+		if (el.length) {
+			const content = el.attr('content') || el.text();
+			const author = stripHtml(content).trim();
+			if (author && author.length > 2 && author.length < 200) {
+				return author;
+			}
+		}
+	}
+
+	return undefined;
+}
+
+/**
+ * Extract publish date from meta tags or time elements.
+ */
+function extractPublishedDate(html: string): string | undefined {
+	const $ = load(html);
+	const selectors = ['meta[property="article:published_time"]', 'meta[name="datePublished"]', 'meta[itemprop="datePublished"]', 'time[datetime]'];
+
+	for (const selector of selectors) {
+		const el = $(selector).first();
+		if (el.length) {
+			const content = el.attr('content') || el.attr('datetime');
+			if (content) {
+				return content;
+			}
+		}
+	}
+
+	return undefined;
+}
+
+/**
+ * Infer article category from URL path or page structure.
+ */
+function inferCategory(html: string, url: string): string | undefined {
+	const urlLower = url.toLowerCase();
+
+	// Try URL-based inference first (fast path)
+	const categoryMappings: Array<[RegExp, string]> = [
+		[/\/news\//i, 'News'],
+		[/\/tech|\/technology/i, 'Technology'],
+		[/\/business|\/finance/i, 'Business'],
+		[/\/science/i, 'Science'],
+		[/\/politics|\/government/i, 'Politics'],
+		[/\/sports/i, 'Sports'],
+		[/\/opinion|\/commentary/i, 'Opinion'],
+	];
+
+	for (const [pattern, category] of categoryMappings) {
+		if (pattern.test(urlLower)) {
+			return category;
+		}
+	}
+
+	return undefined;
+}
+
 function normalizeWhitespace(text: string) {
 	return text.replace(WHITESPACE_PATTERN, ' ').trim();
 }
@@ -139,6 +269,19 @@ export function extractArticleText(html: string) {
 	return bodyText.length > bestCandidate.length ? bodyText : bestCandidate;
 }
 
+/**
+ * Extract article metadata (author, date, category, linked docs).
+ * Optimized for quick extraction without scanning entire DOM.
+ */
+export function extractArticleMetadata(html: string, url: string): ArticleMetadata {
+	return {
+		author: extractAuthor(html),
+		publishedDate: extractPublishedDate(html),
+		category: inferCategory(html, url),
+		linkedDocuments: detectLinkedDocuments(html),
+	};
+}
+
 export async function fetchArticleText(url: string, headers: HeadersInit, timeoutMs: number) {
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -151,18 +294,21 @@ export async function fetchArticleText(url: string, headers: HeadersInit, timeou
 		});
 
 		if (!response.ok) {
-			return '';
+			return { text: '', metadata: {} };
 		}
 
 		const contentType = response.headers.get('content-type') ?? '';
 		if (!contentType.includes('text/html')) {
-			return '';
+			return { text: '', metadata: {} };
 		}
 
 		const html = await response.text();
-		return extractArticleText(html);
+		const text = extractArticleText(html);
+		const metadata = extractArticleMetadata(html, url);
+
+		return { text, metadata };
 	} catch {
-		return '';
+		return { text: '', metadata: {} };
 	} finally {
 		clearTimeout(timeout);
 	}

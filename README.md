@@ -6,6 +6,8 @@
 
 - Aggregates RSS/Atom feeds and Reddit `.rss` feeds through a single internal API
 - Enriches RSS items with full article text and filters thin headline-only entries
+- Performs multi-depth crawler-backed crawling with per-domain rate limiting
+- Extracts article metadata (author, publish date, category, linked documents)
 - Renders a compact multi-column dashboard with horizontal deck scrolling
 - Keeps vertical scrolling inside each column only for an app-like fullscreen layout
 - Supports custom user-created columns composed from existing source snapshots
@@ -32,7 +34,7 @@
 3. Start the development server with `pnpm dev`.
 4. Open the app in your browser and verify the feed columns load.
 
-### Environment variables
+## Environment variables
 
 - `REDIS_URL` — enables Redis-backed caching when present
 - `NEWS_DECK_USER_AGENT` — custom user agent for upstream fetches
@@ -41,6 +43,10 @@
 - `NEWS_DECK_RSS_ARTICLE_TIMEOUT_MS` — per-article fetch timeout (milliseconds)
 - `NEWS_DECK_RSS_MIN_CONTENT_CHARS` — minimum article text length to keep RSS items
 - `NEWS_DECK_RSS_ARTICLE_CONCURRENCY` — max concurrent article fetches per RSS source
+- `NEWS_DECK_CRAWL_DEPTH` — crawler depth for web-crawl feed sources (default: 2)
+- `NEWS_DECK_CRAWL_MAX_PAGES` — max pages to crawl per source (default: 18)
+- `NEWS_DECK_DOMAIN_RATE_LIMIT_MS` — milliseconds between requests to same domain (default: 300)
+- `NEWS_DECK_DOMAIN_MAX_CONCURRENT` — max concurrent domains to crawl (default: 2)
 
 The project works without Redis; it falls back to the built-in memory cache.
 
