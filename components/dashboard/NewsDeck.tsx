@@ -62,13 +62,31 @@ function buildPlaceholderSources(): FeedSourceData[] {
 	}));
 }
 
+function mergeSourceData(sources?: FeedSourceData[]) {
+	const placeholderSources = buildPlaceholderSources();
+	if (!sources || sources.length === 0) {
+		return placeholderSources;
+	}
+
+	const sourceMap = new Map(placeholderSources.map((source) => [source.id, source]));
+	for (const source of sources) {
+		sourceMap.set(source.id, source);
+	}
+
+	return [...sourceMap.values()];
+}
+
 export function NewsDeck() {
-	const { data, error, isLoading, isRefreshing, refresh } = useFeedStream();
-	const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
-	const isHydrated = useHydrated();
 	const { orderedColumns, visibleColumnIds, readItemIds, toggleColumn, addCustomColumn, removeCustomColumn, reorderColumns, markItemRead, toggleItemRead } =
 		useColumnState(defaultFeedColumns);
-	const sourceData = useMemo(() => data?.sources ?? buildPlaceholderSources(), [data]);
+	const prioritizedColumnIds = useMemo(
+		() => orderedColumns.filter((column) => visibleColumnIds.includes(column.id)).map((column) => column.id),
+		[orderedColumns, visibleColumnIds],
+	);
+	const { data, error, isLoading, isRefreshing, loadingColumnIds, refresh } = useFeedStream(prioritizedColumnIds);
+	const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
+	const isHydrated = useHydrated();
+	const sourceData = useMemo(() => mergeSourceData(data?.sources), [data]);
 
 	const allColumns = useMemo(() => {
 		const sourceMap = buildSourceDataMap(sourceData);
@@ -134,7 +152,7 @@ export function NewsDeck() {
 									<SortableColumn
 										key={column.id}
 										column={column}
-										isLoading={isLoading}
+										isLoading={isLoading || loadingColumnIds.includes(column.id)}
 										readItemIds={readItemIds}
 										onOpenItem={markItemRead}
 										onToggleRead={toggleItemRead}
@@ -154,7 +172,7 @@ export function NewsDeck() {
 									className='flex h-full min-h-0 min-w-[20rem] flex-1'>
 									<FeedColumn
 										column={column}
-										isLoading={isLoading}
+										isLoading={isLoading || loadingColumnIds.includes(column.id)}
 										readItemIds={readItemIds}
 										onOpenItem={markItemRead}
 										onToggleRead={toggleItemRead}

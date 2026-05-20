@@ -34,7 +34,7 @@ interface RunScrapyCrawlerOptions {
 }
 
 const SCRAPY_RUNNER = path.join(/* turbopackIgnore: true */ process.cwd(), 'lib', 'crawler', 'scrapy_crawler.py');
-const DEFAULT_TIMEOUT_MS = Math.max(5_000, Number(process.env.SCRAPY_TIMEOUT_MS) || 45_000);
+const DEFAULT_TIMEOUT_MS = Math.max(5_000, Number(process.env.SCRAPY_TIMEOUT_MS) || 90_000);
 
 function normalizeUrl(value = '') {
 	try {

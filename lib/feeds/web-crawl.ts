@@ -18,6 +18,7 @@ interface ExtractedPage {
 	imageUrl?: string;
 	text: string;
 	links: string[];
+	fallbackLinks: string[];
 	score: number;
 	articleLike: boolean;
 	discoverySource?: FeedItem['discoverySource'];
@@ -26,9 +27,12 @@ interface ExtractedPage {
 const DEFAULT_MAX_PAGES = 18;
 const DEFAULT_CRAWL_DEPTH = 1;
 const DEFAULT_MAX_ITEMS_PER_DOMAIN = 3;
-const MAX_LINKS_PER_PAGE = 24;
+const MAX_LINKS_PER_PAGE = 50;
+const MAX_ENRICHMENT_LINKS = 6;
 const MAX_TEXT_LENGTH = 12_000;
 const MIN_BODY_CHARS = 280;
+const THIN_PAGE_TEXT_CHARS = 900;
+const SEARCH_DISCOVERY_MIN_PAGES = 8;
 const NOISE_SELECTORS = [
 	'script',
 	'style',
@@ -78,6 +82,20 @@ const BLOCKED_PATH_PATTERNS = [
 ];
 const BLOCKED_FILE_EXTENSIONS = /\.(?:jpg|jpeg|png|gif|webp|svg|pdf|zip|xml|json|mp4|mp3|avi|mov|txt)$/i;
 const OFFSITE_RESULT_PAGE_PREFIXES = ['/news/search', '/news/event', '/search'];
+const MAX_PAGE_AGE_DAYS = 5;
+const BLOCKED_COMMERCE_HOST_PATTERNS = [/^shopping\./i, /googleadservices\.com$/i, /doubleclick\.net$/i, /ads?\./i];
+const BLOCKED_COMMERCE_URL_PATTERNS = [/\/shop(?:\/|$)/i, /\/shopping(?:\/|$)/i, /\/product(?:s)?(?:\/|$)/i, /\/deals?(?:\/|$)/i, /\/coupon/i, /\/offers?(?:\/|$)/i];
+const BLOCKED_COMMERCE_TEXT_PATTERNS = [
+	/\b(shop now|buy now|add to cart|for sale|limited time offer|promo code|coupon code|discount code|free shipping|black friday|cyber monday)\b/i,
+	/\b(sponsored|advertisement|affiliate link|partner content|paid post)\b/i,
+	/\b(price:\s*\$|sale price|compare prices|best price)\b/i,
+];
+const BLOCKED_GENERIC_TEXT_PATTERNS = [
+	/\b(if you invested|how rich you would be|price prediction|stock price in 20\d{2}|quotes every \d+-year-old)\b/i,
+	/\b(stock of the day|what you need to know|top \d+ stocks|best .* stocks?|buy, sell, or hold)\b/i,
+	/\b(weekly distribution|sec yield|dividend yield|growth & income etf|magnitude of returns)\b/i,
+	/\b(list of|roundup of|everything you need to know)\b/i,
+];
 
 function buildHeaders(source: FeedSourceConfig): HeadersInit {
 	return {
@@ -158,6 +176,93 @@ function shouldSkipUrl(candidate: string) {
 	}
 }
 
+function isPdfUrl(candidate: string) {
+	return /\.pdf(?:$|[?#])/i.test(candidate);
+}
+
+function shouldSkipFallbackUrl(candidate: string) {
+	try {
+		const url = new URL(candidate);
+		const normalized = `${url.pathname}${url.search}`;
+
+		if (BLOCKED_FILE_EXTENSIONS.test(url.pathname) && !isPdfUrl(candidate)) {
+			return true;
+		}
+
+		return BLOCKED_PATH_PATTERNS.some((pattern) => pattern.test(normalized));
+	} catch {
+		return true;
+	}
+}
+
+function isSearchDiscoveryUrl(candidate: string) {
+	if (classifyDiscoverySource(candidate)) {
+		return true;
+	}
+
+	try {
+		const url = new URL(candidate);
+		return /\/(search|news)\b/i.test(url.pathname);
+	} catch {
+		return false;
+	}
+}
+
+function isStalePage(publishedAt: string) {
+	if (!publishedAt) {
+		return false;
+	}
+
+	const ageMs = Date.now() - new Date(publishedAt).getTime();
+	if (Number.isNaN(ageMs)) {
+		return false;
+	}
+
+	return ageMs > MAX_PAGE_AGE_DAYS * 24 * 60 * 60_000;
+}
+
+function matchesAnyPattern(value: string, patterns: RegExp[]) {
+	return patterns.some((pattern) => pattern.test(value));
+}
+
+function shouldRejectPage(pageUrl: string, title: string, summary: string, text: string, publishedAt: string) {
+	const combined = `${title}\n${summary}\n${text.slice(0, 3000)}`;
+
+	try {
+		const url = new URL(pageUrl);
+		const host = normalizeHost(url.hostname);
+		const normalizedUrl = `${host}${url.pathname}${url.search}`;
+
+		if (BLOCKED_COMMERCE_HOST_PATTERNS.some((pattern) => pattern.test(host))) {
+			return true;
+		}
+
+		if (matchesAnyPattern(normalizedUrl, BLOCKED_COMMERCE_URL_PATTERNS)) {
+			return true;
+		}
+	} catch {
+		return true;
+	}
+
+	if (matchesAnyPattern(combined, BLOCKED_COMMERCE_TEXT_PATTERNS)) {
+		return true;
+	}
+
+	if (matchesAnyPattern(combined, BLOCKED_GENERIC_TEXT_PATTERNS)) {
+		return true;
+	}
+
+	if (isStalePage(publishedAt)) {
+		return true;
+	}
+
+	if (summary.length > 0 && summary.length < 48 && !publishedAt) {
+		return true;
+	}
+
+	return false;
+}
+
 function readMeta($: ReturnType<typeof load>, selectors: string[]) {
 	for (const selector of selectors) {
 		const value = $(selector).attr('content')?.trim() ?? $(selector).attr('datetime')?.trim() ?? '';
@@ -168,6 +273,66 @@ function readMeta($: ReturnType<typeof load>, selectors: string[]) {
 	}
 
 	return '';
+}
+
+function scoreFallbackLink(candidateUrl: string, anchorText: string, pageUrl: string, tokens: string[]) {
+	const baseHost = normalizeHost(new URL(pageUrl).hostname);
+	const candidateHost = normalizeHost(new URL(candidateUrl).hostname);
+	const combined = `${anchorText} ${candidateUrl}`.toLowerCase();
+	let score = 0;
+
+	if (isPdfUrl(candidateUrl)) {
+		score += 12;
+	}
+
+	if (candidateHost !== baseHost) {
+		score += 5;
+	}
+
+	if (/\b(source|full report|official filing|investor relations|download|read full|view pdf|sec filing)\b/i.test(anchorText)) {
+		score += 6;
+	}
+
+	if (isSearchDiscoveryUrl(candidateUrl)) {
+		score -= 6;
+	}
+
+	for (const token of tokens) {
+		if (combined.includes(token)) {
+			score += 2;
+		}
+	}
+
+	return score;
+}
+
+function extractFallbackLinks($: ReturnType<typeof load>, pageUrl: string, tokens: string[]) {
+	const rankedLinks = new Map<string, number>();
+
+	$('a[href]').each((_, element) => {
+		const href = $(element).attr('href');
+		if (!href) {
+			return;
+		}
+
+		const candidateUrl = toAbsoluteUrl(href, pageUrl);
+		if (!candidateUrl || candidateUrl === pageUrl || shouldSkipFallbackUrl(candidateUrl)) {
+			return;
+		}
+
+		const anchorText = stripHtml($(element).text());
+		const score = scoreFallbackLink(candidateUrl, anchorText, pageUrl, tokens);
+		const existing = rankedLinks.get(candidateUrl) ?? Number.NEGATIVE_INFINITY;
+
+		if (score > existing) {
+			rankedLinks.set(candidateUrl, score);
+		}
+	});
+
+	return [...rankedLinks.entries()]
+		.sort((left, right) => right[1] - left[1])
+		.map(([candidateUrl]) => candidateUrl)
+		.slice(0, MAX_ENRICHMENT_LINKS);
 }
 
 function readCanonicalUrl($: ReturnType<typeof load>, pageUrl: string) {
@@ -355,6 +520,10 @@ function extractPage(html: string, pageUrl: string, source: FeedSourceConfig, to
 	}
 
 	const publishedAt = readPublishedAt($);
+	if (shouldRejectPage(canonicalUrl, title, summary, text, publishedAt)) {
+		return null;
+	}
+
 	const score = scorePage(canonicalUrl, title, summary, text, publishedAt, tokens, articleLike);
 
 	return {
@@ -365,6 +534,7 @@ function extractPage(html: string, pageUrl: string, source: FeedSourceConfig, to
 		imageUrl: readImageUrl($, canonicalUrl),
 		text,
 		links: extractLinks($, canonicalUrl, source.sameDomainOnly ?? true),
+		fallbackLinks: extractFallbackLinks($, canonicalUrl, tokens),
 		score,
 		articleLike,
 		discoverySource,
@@ -389,6 +559,174 @@ function toFeedItem(page: ExtractedPage, source: FeedSourceConfig): FeedItem {
 		originFeedUrl: source.feedUrl,
 		discoverySource: page.discoverySource,
 	};
+}
+
+function normalizeFallbackTitle(candidateUrl: string) {
+	try {
+		const url = new URL(candidateUrl);
+		const lastSegment = url.pathname.split('/').filter(Boolean).at(-1) ?? url.hostname;
+		return (
+			stripHtml(
+				lastSegment
+					.replace(/[-_]+/g, ' ')
+					.replace(/\.pdf$/i, '')
+					.trim(),
+			) || url.hostname
+		);
+	} catch {
+		return candidateUrl;
+	}
+}
+
+async function fetchPdfFallback(candidateUrl: string, source: FeedSourceConfig, tokens: string[], discoverySource?: FeedItem['discoverySource'], publishedAt?: string) {
+	try {
+		const response = await fetch(candidateUrl, {
+			headers: buildHeaders(source),
+			next: { revalidate: 0 },
+			redirect: 'follow',
+		});
+
+		if (!response.ok) {
+			return null;
+		}
+
+		const finalUrl = response.url || candidateUrl;
+		const pdfParseModule = (await import('pdf-parse')) as unknown as {
+			PDFParse: new (options: { data: Uint8Array }) => {
+				getText: () => Promise<{ text: string }>;
+				getInfo: () => Promise<{ info?: { Title?: string } }>;
+				destroy: () => Promise<void>;
+			};
+		};
+		const pdfBuffer = Buffer.from(await response.arrayBuffer());
+		const parser = new pdfParseModule.PDFParse({ data: new Uint8Array(pdfBuffer) });
+		const [parsedText, parsedInfo] = await Promise.all([parser.getText(), parser.getInfo()]);
+		await parser.destroy();
+		const text = truncate(stripHtml(parsedText.text ?? ''), MAX_TEXT_LENGTH);
+
+		if (text.length < THIN_PAGE_TEXT_CHARS) {
+			return null;
+		}
+
+		const title = stripHtml(parsedInfo.info?.Title ?? normalizeFallbackTitle(finalUrl));
+		const summary = summarizeText(text);
+		const resolvedPublishedAt = publishedAt ?? '';
+
+		if (shouldRejectPage(finalUrl, title, summary, text, resolvedPublishedAt)) {
+			return null;
+		}
+
+		return {
+			title,
+			url: finalUrl,
+			summary,
+			publishedAt: resolvedPublishedAt,
+			imageUrl: undefined,
+			text,
+			links: [],
+			fallbackLinks: [],
+			score: scorePage(finalUrl, title, summary, text, resolvedPublishedAt, tokens, true),
+			articleLike: true,
+			discoverySource,
+		} satisfies ExtractedPage;
+	} catch {
+		return null;
+	}
+}
+
+async function fetchFallbackCandidatesFromPage(pageUrl: string, source: FeedSourceConfig, tokens: string[]) {
+	try {
+		const response = await fetch(pageUrl, {
+			headers: buildHeaders(source),
+			next: { revalidate: 0 },
+			redirect: 'follow',
+		});
+
+		if (!response.ok) {
+			return [];
+		}
+
+		const contentType = response.headers.get('content-type') ?? '';
+		if (!contentType.includes('text/html') && !contentType.includes('application/xhtml+xml')) {
+			return [];
+		}
+
+		const html = await response.text();
+		const finalUrl = response.url || pageUrl;
+		const $ = load(html);
+		return extractFallbackLinks($, finalUrl, tokens);
+	} catch {
+		return [];
+	}
+}
+
+async function fetchFallbackPage(candidateUrl: string, source: FeedSourceConfig, tokens: string[], discoverySource?: FeedItem['discoverySource'], publishedAt?: string) {
+	if (isPdfUrl(candidateUrl)) {
+		return await fetchPdfFallback(candidateUrl, source, tokens, discoverySource, publishedAt);
+	}
+
+	try {
+		const response = await fetch(candidateUrl, {
+			headers: buildHeaders(source),
+			next: { revalidate: 0 },
+			redirect: 'follow',
+		});
+
+		if (!response.ok) {
+			return null;
+		}
+
+		const contentType = response.headers.get('content-type') ?? '';
+		if (contentType.includes('application/pdf')) {
+			return await fetchPdfFallback(response.url || candidateUrl, source, tokens, discoverySource, publishedAt);
+		}
+
+		if (!contentType.includes('text/html') && !contentType.includes('application/xhtml+xml')) {
+			return null;
+		}
+
+		const html = await response.text();
+		const finalUrl = response.url || candidateUrl;
+		const extracted = extractPage(html, finalUrl, source, tokens, discoverySource);
+		if (!extracted) {
+			return null;
+		}
+
+		if (!extracted.publishedAt && publishedAt) {
+			extracted.publishedAt = publishedAt;
+		}
+
+		return extracted;
+	} catch {
+		return null;
+	}
+}
+
+async function enrichThinPage(page: ExtractedPage, source: FeedSourceConfig, tokens: string[]) {
+	if (page.text.length >= THIN_PAGE_TEXT_CHARS && page.summary.length >= 80) {
+		return page;
+	}
+
+	const fallbackLinks = page.fallbackLinks.length > 0 ? page.fallbackLinks : await fetchFallbackCandidatesFromPage(page.url, source, tokens);
+
+	for (const candidateUrl of fallbackLinks.slice(0, MAX_ENRICHMENT_LINKS)) {
+		const enrichedPage = await fetchFallbackPage(candidateUrl, source, tokens, page.discoverySource, page.publishedAt);
+		if (!enrichedPage) {
+			continue;
+		}
+
+		if (enrichedPage.text.length <= page.text.length + 250) {
+			continue;
+		}
+
+		return {
+			...enrichedPage,
+			title: enrichedPage.title.length >= 20 ? enrichedPage.title : page.title,
+			discoverySource: page.discoverySource ?? enrichedPage.discoverySource,
+		};
+	}
+
+	return page;
 }
 
 function summarizeText(text: string) {
@@ -427,18 +765,24 @@ function scoreScrapyPage(page: ScrapyPage, source: FeedSourceConfig, tokens: str
 function mapScrapyPage(page: ScrapyPage, source: FeedSourceConfig, tokens: string[], discoverySource?: FeedItem['discoverySource']): ExtractedPage | null {
 	const title = stripHtml(page.title);
 	const text = truncate(stripHtml(page.text), MAX_TEXT_LENGTH);
+	const summary = summarizeText(text);
 
 	if (!title || !text) {
+		return null;
+	}
+
+	if (shouldRejectPage(page.url, title, summary, text, '')) {
 		return null;
 	}
 
 	return {
 		title,
 		url: page.url,
-		summary: summarizeText(text),
+		summary,
 		publishedAt: '',
 		text,
 		links: page.links,
+		fallbackLinks: page.links,
 		score: scoreScrapyPage(page, source, tokens),
 		articleLike: text.length >= 600,
 		discoverySource,
@@ -447,13 +791,14 @@ function mapScrapyPage(page: ScrapyPage, source: FeedSourceConfig, tokens: strin
 
 async function crawlWithScrapy(source: FeedSourceConfig, tokens: string[]) {
 	const seedUrls = source.seedUrls?.filter(Boolean) ?? [];
-	const maxPages = Math.max(1, Math.min(source.crawlMaxPages ?? DEFAULT_MAX_PAGES, 40));
+	const maxPages = Math.max(1, Math.min(source.crawlMaxPages ?? DEFAULT_MAX_PAGES, 80));
 	const crawlDepth = Math.max(0, Math.min(source.crawlDepth ?? DEFAULT_CRAWL_DEPTH, 2));
-	const pagesPerSeed = Math.max(1, Math.ceil(maxPages / seedUrls.length));
 	const matches: ExtractedPage[] = [];
 
 	for (const seedUrl of seedUrls) {
 		const discoverySource = classifyDiscoverySource(seedUrl);
+		const pagesPerSeed =
+			discoverySource ? Math.max(SEARCH_DISCOVERY_MIN_PAGES, Math.ceil(maxPages / Math.max(seedUrls.length, 1))) : Math.max(3, Math.ceil(maxPages / Math.max(seedUrls.length, 1)));
 		const result = await runScrapyCrawler({
 			url: seedUrl,
 			maxPages: pagesPerSeed,
@@ -467,8 +812,10 @@ async function crawlWithScrapy(source: FeedSourceConfig, tokens: string[]) {
 				continue;
 			}
 
-			if (mapped.score >= 4 && (mapped.articleLike || mapped.text.length >= 600)) {
-				matches.push(mapped);
+			const enrichedPage = await enrichThinPage(mapped, source, tokens);
+
+			if (enrichedPage.score >= 4 && (enrichedPage.articleLike || enrichedPage.text.length >= 600)) {
+				matches.push(enrichedPage);
 			}
 		}
 	}
@@ -485,7 +832,7 @@ async function crawlWithCheerio(source: FeedSourceConfig, tokens: string[]) {
 		discoverySource: classifyDiscoverySource(url),
 	}));
 	const matches: ExtractedPage[] = [];
-	const maxPages = Math.max(1, Math.min(source.crawlMaxPages ?? DEFAULT_MAX_PAGES, 40));
+	const maxPages = Math.max(1, Math.min(source.crawlMaxPages ?? DEFAULT_MAX_PAGES, 80));
 	const crawlDepth = Math.max(0, Math.min(source.crawlDepth ?? DEFAULT_CRAWL_DEPTH, 2));
 	let crawledCount = 0;
 
@@ -522,12 +869,14 @@ async function crawlWithCheerio(source: FeedSourceConfig, tokens: string[]) {
 				continue;
 			}
 
-			if (page.score >= 4 && (page.articleLike || page.text.length >= 600)) {
-				matches.push(page);
+			const enrichedPage = await enrichThinPage(page, source, tokens);
+
+			if (enrichedPage.score >= 4 && (enrichedPage.articleLike || enrichedPage.text.length >= 600)) {
+				matches.push(enrichedPage);
 			}
 
 			if (current.depth < crawlDepth) {
-				for (const nextUrl of page.links) {
+				for (const nextUrl of enrichedPage.links) {
 					if (!visited.has(nextUrl)) {
 						queue.push({
 							url: nextUrl,

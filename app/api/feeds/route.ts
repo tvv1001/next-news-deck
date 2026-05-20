@@ -40,8 +40,12 @@ async function fetchSourcePayload(source: FeedSourceConfig): Promise<FeedSourceR
 async function getSourceResult(source: FeedSourceConfig) {
 	const cacheKey = `feed-source:${source.id}`;
 	const ttlMs = source.pollMinutes * 60_000;
+	const isBackgroundCrawl = source.kind === 'web-crawl';
 
-	return getCachedValue(cacheKey, ttlMs, () => fetchSourcePayload(source));
+	return getCachedValue(cacheKey, ttlMs, () => fetchSourcePayload(source), {
+		staleWhileRevalidateMs: isBackgroundCrawl ? 8 * 60_000 : 0,
+		refreshInBackground: isBackgroundCrawl,
+	});
 }
 
 function selectColumns(columnId?: string | null) {
@@ -50,6 +54,11 @@ function selectColumns(columnId?: string | null) {
 	}
 
 	return defaultFeedColumns.filter((column) => column.id === columnId);
+}
+
+function selectSources(columns: Array<{ sourceIds: string[] }>) {
+	const sourceIds = new Set(columns.flatMap((column) => column.sourceIds));
+	return defaultFeedSources.filter((source) => sourceIds.has(source.id));
 }
 
 export async function GET(request: NextRequest) {
@@ -61,7 +70,8 @@ export async function GET(request: NextRequest) {
 		return NextResponse.json({ error: `Unknown column \"${columnId}\".` }, { status: 404 });
 	}
 
-	const sourceResults = await Promise.all(defaultFeedSources.map(getSourceResult));
+	const requestedSources = selectSources(columns);
+	const sourceResults = await Promise.all(requestedSources.map(getSourceResult));
 	const sources: FeedSourceData[] = sourceResults.map((result) => ({
 		...result.value.source,
 		items: result.value.items,
