@@ -17,6 +17,7 @@ export interface FeedItem {
 	imageUrl?: string;
 	tags: string[];
 	originFeedUrl: string;
+	discoverySource?: 'bing' | 'google';
 }
 
 export interface FeedSourceConfig {

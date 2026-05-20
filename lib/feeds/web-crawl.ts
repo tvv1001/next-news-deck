@@ -7,6 +7,7 @@ import { FeedItem, FeedSourceConfig, FeedSourceResult } from '@/lib/feeds/types'
 interface CrawlQueueItem {
 	url: string;
 	depth: number;
+	discoverySource?: FeedItem['discoverySource'];
 }
 
 interface ExtractedPage {
@@ -19,6 +20,7 @@ interface ExtractedPage {
 	links: string[];
 	score: number;
 	articleLike: boolean;
+	discoverySource?: FeedItem['discoverySource'];
 }
 
 const DEFAULT_MAX_PAGES = 18;
@@ -75,6 +77,7 @@ const BLOCKED_PATH_PATTERNS = [
 	/\/amp\/?$/i,
 ];
 const BLOCKED_FILE_EXTENSIONS = /\.(?:jpg|jpeg|png|gif|webp|svg|pdf|zip|xml|json|mp4|mp3|avi|mov|txt)$/i;
+const OFFSITE_RESULT_PAGE_PREFIXES = ['/news/search', '/news/event', '/search'];
 
 function buildHeaders(source: FeedSourceConfig): HeadersInit {
 	return {
@@ -100,6 +103,40 @@ function toAbsoluteUrl(candidate: string, baseUrl: string) {
 
 function normalizeHost(hostname: string) {
 	return hostname.replace(/^www\./i, '').toLowerCase();
+}
+
+function classifyDiscoverySource(url: string): FeedItem['discoverySource'] {
+	try {
+		const parsed = new URL(url);
+		const host = normalizeHost(parsed.hostname);
+
+		if (host.endsWith('bing.com')) {
+			return 'bing';
+		}
+
+		if (host.endsWith('google.com') || host.endsWith('news.google.com')) {
+			return 'google';
+		}
+
+		return undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function canFollowOffsiteLinks(pageUrl: string) {
+	try {
+		const url = new URL(pageUrl);
+		const host = normalizeHost(url.hostname);
+
+		if (host === 'bing.com' || host === 'google.com' || host === 'news.google.com') {
+			return OFFSITE_RESULT_PAGE_PREFIXES.some((prefix) => url.pathname.startsWith(prefix));
+		}
+
+		return false;
+	} catch {
+		return false;
+	}
 }
 
 function tokenizeQuery(query?: string) {
@@ -277,6 +314,7 @@ function scorePage(pageUrl: string, title: string, summary: string, text: string
 
 function extractLinks($: ReturnType<typeof load>, pageUrl: string, sameDomainOnly: boolean) {
 	const baseHost = normalizeHost(new URL(pageUrl).hostname);
+	const allowOffsiteLinks = !sameDomainOnly || canFollowOffsiteLinks(pageUrl);
 	const links: string[] = [];
 
 	$('article a[href], main a[href], a[href]').each((_, element) => {
@@ -294,7 +332,7 @@ function extractLinks($: ReturnType<typeof load>, pageUrl: string, sameDomainOnl
 			return;
 		}
 
-		if (sameDomainOnly && normalizeHost(new URL(nextUrl).hostname) !== baseHost) {
+		if (!allowOffsiteLinks && normalizeHost(new URL(nextUrl).hostname) !== baseHost) {
 			return;
 		}
 
@@ -304,7 +342,7 @@ function extractLinks($: ReturnType<typeof load>, pageUrl: string, sameDomainOnl
 	return links;
 }
 
-function extractPage(html: string, pageUrl: string, source: FeedSourceConfig, tokens: string[]): ExtractedPage | null {
+function extractPage(html: string, pageUrl: string, source: FeedSourceConfig, tokens: string[], discoverySource?: FeedItem['discoverySource']): ExtractedPage | null {
 	const $ = load(html);
 	const canonicalUrl = readCanonicalUrl($, pageUrl);
 	const title = readTitle($);
@@ -329,6 +367,7 @@ function extractPage(html: string, pageUrl: string, source: FeedSourceConfig, to
 		links: extractLinks($, canonicalUrl, source.sameDomainOnly ?? true),
 		score,
 		articleLike,
+		discoverySource,
 	};
 }
 
@@ -348,6 +387,7 @@ function toFeedItem(page: ExtractedPage, source: FeedSourceConfig): FeedItem {
 		imageUrl: page.imageUrl,
 		tags: [...new Set(source.tags)],
 		originFeedUrl: source.feedUrl,
+		discoverySource: page.discoverySource,
 	};
 }
 
@@ -384,7 +424,7 @@ function scoreScrapyPage(page: ScrapyPage, source: FeedSourceConfig, tokens: str
 	return scorePage(page.url, page.title, summarizeText(page.text), page.text, '', tokens, page.text.length >= 600);
 }
 
-function mapScrapyPage(page: ScrapyPage, source: FeedSourceConfig, tokens: string[]): ExtractedPage | null {
+function mapScrapyPage(page: ScrapyPage, source: FeedSourceConfig, tokens: string[], discoverySource?: FeedItem['discoverySource']): ExtractedPage | null {
 	const title = stripHtml(page.title);
 	const text = truncate(stripHtml(page.text), MAX_TEXT_LENGTH);
 
@@ -401,6 +441,7 @@ function mapScrapyPage(page: ScrapyPage, source: FeedSourceConfig, tokens: strin
 		links: page.links,
 		score: scoreScrapyPage(page, source, tokens),
 		articleLike: text.length >= 600,
+		discoverySource,
 	};
 }
 
@@ -412,15 +453,16 @@ async function crawlWithScrapy(source: FeedSourceConfig, tokens: string[]) {
 	const matches: ExtractedPage[] = [];
 
 	for (const seedUrl of seedUrls) {
+		const discoverySource = classifyDiscoverySource(seedUrl);
 		const result = await runScrapyCrawler({
 			url: seedUrl,
 			maxPages: pagesPerSeed,
 			maxDepth: crawlDepth,
-			allowOffsite: !(source.sameDomainOnly ?? true),
+			allowOffsite: !(source.sameDomainOnly ?? true) || canFollowOffsiteLinks(seedUrl),
 		});
 
 		for (const page of result.pages) {
-			const mapped = mapScrapyPage(page, source, tokens);
+			const mapped = mapScrapyPage(page, source, tokens, discoverySource);
 			if (!mapped) {
 				continue;
 			}
@@ -437,7 +479,11 @@ async function crawlWithScrapy(source: FeedSourceConfig, tokens: string[]) {
 async function crawlWithCheerio(source: FeedSourceConfig, tokens: string[]) {
 	const seedUrls = source.seedUrls?.filter(Boolean) ?? [];
 	const visited = new Set<string>();
-	const queue: CrawlQueueItem[] = seedUrls.map((url) => ({ url, depth: 0 }));
+	const queue: CrawlQueueItem[] = seedUrls.map((url) => ({
+		url,
+		depth: 0,
+		discoverySource: classifyDiscoverySource(url),
+	}));
 	const matches: ExtractedPage[] = [];
 	const maxPages = Math.max(1, Math.min(source.crawlMaxPages ?? DEFAULT_MAX_PAGES, 40));
 	const crawlDepth = Math.max(0, Math.min(source.crawlDepth ?? DEFAULT_CRAWL_DEPTH, 2));
@@ -469,7 +515,7 @@ async function crawlWithCheerio(source: FeedSourceConfig, tokens: string[]) {
 
 			const html = await response.text();
 			const finalUrl = response.url || current.url;
-			const page = extractPage(html, finalUrl, source, tokens);
+			const page = extractPage(html, finalUrl, source, tokens, current.discoverySource ?? classifyDiscoverySource(finalUrl));
 			crawledCount += 1;
 
 			if (!page) {
@@ -483,7 +529,11 @@ async function crawlWithCheerio(source: FeedSourceConfig, tokens: string[]) {
 			if (current.depth < crawlDepth) {
 				for (const nextUrl of page.links) {
 					if (!visited.has(nextUrl)) {
-						queue.push({ url: nextUrl, depth: current.depth + 1 });
+						queue.push({
+							url: nextUrl,
+							depth: current.depth + 1,
+							discoverySource: current.discoverySource ?? classifyDiscoverySource(nextUrl),
+						});
 					}
 				}
 			}

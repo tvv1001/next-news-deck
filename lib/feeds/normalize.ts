@@ -88,8 +88,18 @@ export function dedupeAndSortFeedItems(items: FeedItem[]): FeedItem[] {
 	const deduped = new Map<string, FeedItem>();
 
 	for (const item of items) {
-		if (!deduped.has(item.dedupeKey)) {
+		const existing = deduped.get(item.dedupeKey);
+
+		if (!existing) {
 			deduped.set(item.dedupeKey, item);
+			continue;
+		}
+
+		if (!existing.discoverySource && item.discoverySource) {
+			deduped.set(item.dedupeKey, {
+				...existing,
+				discoverySource: item.discoverySource,
+			});
 		}
 	}
 

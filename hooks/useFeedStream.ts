@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { FeedResponse } from '@/lib/feeds/types';
 
-const DEFAULT_REFRESH_MS = 90_000;
+const DEFAULT_REFRESH_MS = 30_000;
 
 export function useFeedStream(refreshMs = DEFAULT_REFRESH_MS) {
 	const [data, setData] = useState<FeedResponse | null>(null);
@@ -12,41 +12,53 @@ export function useFeedStream(refreshMs = DEFAULT_REFRESH_MS) {
 	const [isLoading, setIsLoading] = useState(true);
 	const [isRefreshing, setIsRefreshing] = useState(false);
 	const mountedRef = useRef(true);
+	const refreshInFlightRef = useRef<Promise<void> | null>(null);
 
 	const refresh = useCallback(async () => {
-		try {
-			setIsRefreshing(true);
-			setError(null);
-
-			const response = await fetch('/api/feeds', {
-				cache: 'no-store',
-			});
-
-			if (!response.ok) {
-				throw new Error(`Feed request failed (${response.status})`);
-			}
-
-			const payload = (await response.json()) as FeedResponse;
-
-			if (!mountedRef.current) {
-				return;
-			}
-
-			setData(payload);
-		} catch (nextError) {
-			if (!mountedRef.current) {
-				return;
-			}
-
-			setError(nextError instanceof Error ? nextError.message : 'Unable to refresh feeds right now.');
-		} finally {
-			if (!mountedRef.current) {
-				return;
-			}
-
-			setIsLoading(false);
-			setIsRefreshing(false);
+		if (refreshInFlightRef.current) {
+			return await refreshInFlightRef.current;
 		}
+
+		const refreshPromise = (async () => {
+			try {
+				setIsRefreshing(true);
+				setError(null);
+
+				const response = await fetch('/api/feeds', {
+					cache: 'no-store',
+				});
+
+				if (!response.ok) {
+					throw new Error(`Feed request failed (${response.status})`);
+				}
+
+				const payload = (await response.json()) as FeedResponse;
+
+				if (!mountedRef.current) {
+					return;
+				}
+
+				setData(payload);
+			} catch (nextError) {
+				if (!mountedRef.current) {
+					return;
+				}
+
+				setError(nextError instanceof Error ? nextError.message : 'Unable to refresh feeds right now.');
+			} finally {
+				refreshInFlightRef.current = null;
+
+				if (!mountedRef.current) {
+					return;
+				}
+
+				setIsLoading(false);
+				setIsRefreshing(false);
+			}
+		})();
+
+		refreshInFlightRef.current = refreshPromise;
+		return await refreshPromise;
 	}, []);
 
 	useEffect(() => {

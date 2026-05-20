@@ -28,6 +28,18 @@ function hostnameFromUrl(url: string) {
 	}
 }
 
+function discoveryLabel(source?: FeedItem['discoverySource']) {
+	if (source === 'bing') {
+		return 'via Bing';
+	}
+
+	if (source === 'google') {
+		return 'via Google';
+	}
+
+	return '';
+}
+
 export function FeedCard({ item, isRead, onOpen, onToggleRead }: FeedCardProps) {
 	return (
 		<article
@@ -36,7 +48,14 @@ export function FeedCard({ item, isRead, onOpen, onToggleRead }: FeedCardProps) 
 			}`}>
 			<div className='mb-3 flex items-start justify-between gap-3'>
 				<div>
-					<p className='text-xs font-medium uppercase tracking-[0.24em] text-cyan-300/90'>{item.sourceName}</p>
+					<div className='flex flex-wrap items-center gap-2'>
+						<p className='text-xs font-medium uppercase tracking-[0.24em] text-cyan-300/90'>{item.sourceName}</p>
+						{item.discoverySource ?
+							<span className='rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-200'>
+								{discoveryLabel(item.discoverySource)}
+							</span>
+						:	null}
+					</div>
 					<p className='mt-1 text-xs text-slate-400'>{formatTimestamp(item.publishedAt)}</p>
 				</div>
 				<button
