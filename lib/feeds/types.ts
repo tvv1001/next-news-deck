@@ -9,6 +9,7 @@ export interface FeedItem {
 	title: string;
 	url: string;
 	summary: string;
+	content?: string;
 	sourceId: string;
 	sourceName: string;
 	sourceKind: FeedSourceKind;

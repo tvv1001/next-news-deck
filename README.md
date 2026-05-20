@@ -5,6 +5,7 @@
 ## What it does
 
 - Aggregates RSS/Atom feeds and Reddit `.rss` feeds through a single internal API
+- Enriches RSS items with full article text and filters thin headline-only entries
 - Renders a compact multi-column dashboard with horizontal deck scrolling
 - Keeps vertical scrolling inside each column only for an app-like fullscreen layout
 - Supports custom user-created columns composed from existing source snapshots
@@ -37,6 +38,9 @@
 - `NEWS_DECK_USER_AGENT` — custom user agent for upstream fetches
 - `PYTHON_BIN` — Python executable used for the optional Scrapy bridge
 - `SCRAPY_TIMEOUT_MS` — timeout for Scrapy-backed crawl attempts before fallback
+- `NEWS_DECK_RSS_ARTICLE_TIMEOUT_MS` — per-article fetch timeout (milliseconds)
+- `NEWS_DECK_RSS_MIN_CONTENT_CHARS` — minimum article text length to keep RSS items
+- `NEWS_DECK_RSS_ARTICLE_CONCURRENCY` — max concurrent article fetches per RSS source
 
 The project works without Redis; it falls back to the built-in memory cache.
 

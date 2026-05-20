@@ -1,7 +1,7 @@
 import { load } from 'cheerio';
 
 import { runScrapyCrawler, ScrapyPage } from '@/lib/crawler/scrapy-runner';
-import { buildDedupeKey, dedupeAndSortFeedItems, stripHtml, toIsoDate, truncate } from '@/lib/feeds/normalize';
+import { buildDedupeKey, dedupeAndSortFeedItems, sanitizeArticleImageUrl, stripHtml, toIsoDate, truncate } from '@/lib/feeds/normalize';
 import { FeedItem, FeedSourceConfig, FeedSourceResult } from '@/lib/feeds/types';
 
 interface CrawlQueueItem {
@@ -26,13 +26,13 @@ interface ExtractedPage {
 
 const DEFAULT_MAX_PAGES = 18;
 const DEFAULT_CRAWL_DEPTH = 1;
-const DEFAULT_MAX_ITEMS_PER_DOMAIN = 3;
+const DEFAULT_MAX_ITEMS_PER_DOMAIN = 5;
 const MAX_LINKS_PER_PAGE = 50;
 const MAX_ENRICHMENT_LINKS = 6;
 const MAX_TEXT_LENGTH = 12_000;
 const MIN_BODY_CHARS = 280;
 const THIN_PAGE_TEXT_CHARS = 900;
-const SEARCH_DISCOVERY_MIN_PAGES = 8;
+const SEARCH_DISCOVERY_MIN_PAGES = 12;
 const NOISE_SELECTORS = [
 	'script',
 	'style',
@@ -82,7 +82,7 @@ const BLOCKED_PATH_PATTERNS = [
 ];
 const BLOCKED_FILE_EXTENSIONS = /\.(?:jpg|jpeg|png|gif|webp|svg|pdf|zip|xml|json|mp4|mp3|avi|mov|txt)$/i;
 const OFFSITE_RESULT_PAGE_PREFIXES = ['/news/search', '/news/event', '/search'];
-const MAX_PAGE_AGE_DAYS = 5;
+const MAX_PAGE_AGE_DAYS = 10;
 const BLOCKED_COMMERCE_HOST_PATTERNS = [/^shopping\./i, /googleadservices\.com$/i, /doubleclick\.net$/i, /ads?\./i];
 const BLOCKED_COMMERCE_URL_PATTERNS = [/\/shop(?:\/|$)/i, /\/shopping(?:\/|$)/i, /\/product(?:s)?(?:\/|$)/i, /\/deals?(?:\/|$)/i, /\/coupon/i, /\/offers?(?:\/|$)/i];
 const BLOCKED_COMMERCE_TEXT_PATTERNS = [
@@ -206,6 +206,29 @@ function isSearchDiscoveryUrl(candidate: string) {
 	} catch {
 		return false;
 	}
+}
+
+function extractAiSearchSnippet($: ReturnType<typeof load>, pageUrl: string) {
+	const discoverySource = classifyDiscoverySource(pageUrl);
+	if (!discoverySource) {
+		return null;
+	}
+
+	const aiSnippetSelectors = ['.b_ans', '[data-attrid="ai_overview"]', '.ai-generated', '[data-component="ai-summary"]'];
+
+	for (const selector of aiSnippetSelectors) {
+		const snippet = $(selector).first();
+		if (!snippet.length) {
+			continue;
+		}
+
+		const text = stripHtml(snippet.text());
+		if (text.length >= 150) {
+			return text;
+		}
+	}
+
+	return null;
 }
 
 function isStalePage(publishedAt: string) {
@@ -370,14 +393,21 @@ function readSummary($: ReturnType<typeof load>) {
 }
 
 function readImageUrl($: ReturnType<typeof load>, pageUrl: string) {
-	const image =
-		readMeta($, ['meta[property="og:image"]', 'meta[name="twitter:image"]']) ||
-		$('article img').first().attr('src') ||
-		$('main img').first().attr('src') ||
-		$('img').first().attr('src') ||
-		'';
+	const candidates = [
+		readMeta($, ['meta[property="og:image"]', 'meta[name="twitter:image"]']),
+		$('article img').first().attr('src') || '',
+		$('main img').first().attr('src') || '',
+		$('img').first().attr('src') || '',
+	];
 
-	return image ? (toAbsoluteUrl(image, pageUrl) ?? undefined) : undefined;
+	for (const candidate of candidates) {
+		const sanitized = sanitizeArticleImageUrl(candidate, pageUrl);
+		if (sanitized) {
+			return sanitized;
+		}
+	}
+
+	return undefined;
 }
 
 function readPublishedAt($: ReturnType<typeof load>) {
@@ -510,6 +540,32 @@ function extractLinks($: ReturnType<typeof load>, pageUrl: string, sameDomainOnl
 function extractPage(html: string, pageUrl: string, source: FeedSourceConfig, tokens: string[], discoverySource?: FeedItem['discoverySource']): ExtractedPage | null {
 	const $ = load(html);
 	const canonicalUrl = readCanonicalUrl($, pageUrl);
+
+	if (isSearchDiscoveryUrl(canonicalUrl)) {
+		const aiSnippet = extractAiSearchSnippet($, canonicalUrl);
+		if (aiSnippet) {
+			const snippetTitle = `AI Summary: ${source.query ?? 'Search Results'}`;
+			const snippetSummary = truncate(aiSnippet, 220);
+			const snippetText = truncate(aiSnippet, MAX_TEXT_LENGTH);
+
+			return {
+				title: snippetTitle,
+				url: canonicalUrl,
+				summary: snippetSummary,
+				publishedAt: new Date().toISOString(),
+				imageUrl: undefined,
+				text: snippetText,
+				links: [],
+				fallbackLinks: [],
+				score: 15,
+				articleLike: true,
+				discoverySource,
+			};
+		}
+
+		return null;
+	}
+
 	const title = readTitle($);
 	const summary = readSummary($);
 	const text = readBodyText($);
@@ -862,10 +918,22 @@ async function crawlWithCheerio(source: FeedSourceConfig, tokens: string[]) {
 
 			const html = await response.text();
 			const finalUrl = response.url || current.url;
+			const discoveryLinks = isSearchDiscoveryUrl(finalUrl) ? extractLinks(load(html), finalUrl, source.sameDomainOnly ?? true) : [];
 			const page = extractPage(html, finalUrl, source, tokens, current.discoverySource ?? classifyDiscoverySource(finalUrl));
 			crawledCount += 1;
 
 			if (!page) {
+				if (current.depth < crawlDepth) {
+					for (const nextUrl of discoveryLinks) {
+						if (!visited.has(nextUrl)) {
+							queue.push({
+								url: nextUrl,
+								depth: current.depth + 1,
+								discoverySource: current.discoverySource ?? classifyDiscoverySource(nextUrl),
+							});
+						}
+					}
+				}
 				continue;
 			}
 
