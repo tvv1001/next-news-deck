@@ -103,16 +103,18 @@ export function FeedColumn({ column, isLoading, readItemIds, onOpenItem, onToggl
 	}, [pendingItemIds.length]);
 
 	useEffect(() => {
+		const animationTimers = animationTimersRef.current;
+
 		return () => {
 			if (revealTimerRef.current) {
 				window.clearTimeout(revealTimerRef.current);
 			}
 
-			for (const timerId of animationTimersRef.current.values()) {
+			for (const timerId of animationTimers.values()) {
 				window.clearTimeout(timerId);
 			}
 
-			animationTimersRef.current.clear();
+			animationTimers.clear();
 		};
 	}, []);
 

@@ -78,7 +78,7 @@ function mergeSourceData(sources?: FeedSourceData[]) {
 }
 
 export function NewsDeck() {
-	const { orderedColumns, visibleColumnIds, readItemIds, toggleColumn, addCustomColumn, removeCustomColumn, reorderColumns, markItemRead, toggleItemRead } =
+	const { orderedColumns, visibleColumnIds, readItemIds, toggleColumn, addCustomColumn, removeCustomColumn, reorderColumns, markItemRead, toggleItemRead, resetColumnState } =
 		useColumnState(defaultFeedColumns);
 	const prioritizedColumnIds = useMemo(
 		() => orderedColumns.filter((column) => visibleColumnIds.includes(column.id)).map((column) => column.id),
@@ -129,6 +129,12 @@ export function NewsDeck() {
 							className='rounded-full bg-cyan-400 px-2.5 py-1 font-medium text-slate-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:bg-cyan-950 disabled:text-cyan-200'
 							disabled={isRefreshing}>
 							{isRefreshing ? 'Refreshing…' : 'Refresh'}
+						</button>
+						<button
+							type='button'
+							onClick={resetColumnState}
+							className='rounded-full border border-white/10 bg-white/5 px-2.5 py-1 font-medium text-slate-100 transition hover:border-cyan-300/30 hover:text-white'>
+							Reset layout
 						</button>
 						<Link
 							href='/sse-status'

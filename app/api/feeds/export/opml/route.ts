@@ -6,16 +6,18 @@
  * Save the output and import into Feedly, Apple News, Inoreader, etc.
  */
 
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 
-import { defaultFeedSources } from '@/lib/config/default-columns';
+import { getConfiguredFeedSources } from '@/lib/config/source-registry';
 import { generateOpmlXml } from '@/lib/feeds/rss-generator';
 
-export async function GET(req: NextRequest): Promise<NextResponse> {
+export async function GET(): Promise<NextResponse> {
 	try {
+		const configuredSources = await getConfiguredFeedSources();
+
 		// Generate OPML from all feed sources
 		const opmlXml = generateOpmlXml(
-			defaultFeedSources.map((source) => ({
+			configuredSources.map((source) => ({
 				id: source.id,
 				title: source.title,
 				feedUrl: source.feedUrl,

@@ -3,7 +3,8 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import type { FeedLiveUpdate } from '@/lib/feeds/types';
+import { SourceConfigManager } from '@/components/status/SourceConfigManager';
+import type { FeedLiveUpdate, FeedSourceWithMeta } from '@/lib/feeds/types';
 
 type ConnectionState = 'connecting' | 'open' | 'error' | 'closed';
 
@@ -93,7 +94,7 @@ function MetricCard({ label, value, hint }: { label: string; value: string | num
 	);
 }
 
-export function SseStatusPage() {
+export function SseStatusPage({ initialSources }: { initialSources: FeedSourceWithMeta[] }) {
 	const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
 	const [health, setHealth] = useState<HealthSnapshot | null>(null);
 	const [readyPayload, setReadyPayload] = useState<SseReadyPayload | null>(null);
@@ -504,6 +505,10 @@ export function SseStatusPage() {
 								</ul>
 							</div>
 						</div>
+					</div>
+
+					<div className='mt-3'>
+						<SourceConfigManager initialSources={initialSources} />
 					</div>
 				</section>
 			</main>

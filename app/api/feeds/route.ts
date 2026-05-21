@@ -1,56 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-import { getCachedValue } from '@/lib/cache/feed-cache';
 import { getPreferredCacheMode } from '@/lib/cache/redis';
+import { defaultFeedColumns } from '@/lib/config/default-columns';
+import { getConfiguredFeedSourceMap, getConfiguredFeedSources } from '@/lib/config/source-registry';
 import { buildColumnData, buildSourceDataMap } from '@/lib/feeds/compose';
-import { defaultFeedColumns, defaultFeedSources, feedSourceMap } from '@/lib/config/default-columns';
-import { fetchRedditSource } from '@/lib/feeds/reddit';
-import { fetchRssSource } from '@/lib/feeds/rss';
-import { publishFeedSourceUpdate } from '@/lib/feeds/live-updates';
-import { fetchWebCrawlSource } from '@/lib/feeds/web-crawl';
-import { FeedColumnData, FeedResponse, FeedSourceConfig, FeedSourceData, FeedSourceResult } from '@/lib/feeds/types';
-
-async function fetchSourcePayload(source: FeedSourceConfig): Promise<FeedSourceResult> {
-	try {
-		if (source.kind === 'web-crawl') {
-			return await fetchWebCrawlSource(source);
-		}
-
-		if (source.kind === 'reddit') {
-			return await fetchRedditSource(source);
-		}
-
-		return await fetchRssSource(source);
-	} catch (error) {
-		const fetchedAt = new Date().toISOString();
-
-		return {
-			source,
-			items: [],
-			fetchedAt,
-			staleAt: new Date(Date.now() + 2 * 60_000).toISOString(),
-			error: {
-				sourceId: source.id,
-				message: error instanceof Error ? error.message : 'Unexpected feed ingestion error.',
-				retryable: true,
-			},
-		};
-	}
-}
-
-async function getSourceResult(source: FeedSourceConfig) {
-	const cacheKey = `feed-source:${source.id}`;
-	const ttlMs = source.pollMinutes * 60_000;
-	const isBackgroundCrawl = source.kind === 'web-crawl';
-
-	return getCachedValue(cacheKey, ttlMs, () => fetchSourcePayload(source), {
-		staleWhileRevalidateMs: isBackgroundCrawl ? 8 * 60_000 : 0,
-		refreshInBackground: isBackgroundCrawl,
-		onValueStored: (previousValue, nextValue) => {
-			publishFeedSourceUpdate(previousValue, nextValue);
-		},
-	});
-}
+import { FeedColumnData, FeedResponse, FeedSourceConfig, FeedSourceData } from '@/lib/feeds/types';
+import { getSourceResult } from '@/lib/feeds/source-runtime';
 
 function selectColumns(columnId?: string | null) {
 	if (!columnId) {
@@ -60,21 +15,23 @@ function selectColumns(columnId?: string | null) {
 	return defaultFeedColumns.filter((column) => column.id === columnId);
 }
 
-function selectSources(columns: Array<{ sourceIds: string[] }>) {
+function selectSources(columns: Array<{ sourceIds: string[] }>, allSources: FeedSourceConfig[]) {
 	const sourceIds = new Set(columns.flatMap((column) => column.sourceIds));
-	return defaultFeedSources.filter((source) => sourceIds.has(source.id));
+	return allSources.filter((source) => sourceIds.has(source.id));
 }
 
 export async function GET(request: NextRequest) {
 	const { searchParams } = new URL(request.url);
 	const columnId = searchParams.get('columnId');
 	const columns = selectColumns(columnId);
+	const configuredSources = await getConfiguredFeedSources();
+	const configuredSourceMap = await getConfiguredFeedSourceMap();
 
 	if (columnId && columns.length === 0) {
 		return NextResponse.json({ error: `Unknown column \"${columnId}\".` }, { status: 404 });
 	}
 
-	const requestedSources = selectSources(columns);
+	const requestedSources = selectSources(columns, configuredSources);
 	const sourceResults = await Promise.all(requestedSources.map(getSourceResult));
 	const sources: FeedSourceData[] = sourceResults.map((result) => ({
 		...result.value.source,
@@ -86,7 +43,7 @@ export async function GET(request: NextRequest) {
 	}));
 	const sourceMap = buildSourceDataMap(sources);
 	const hydratedColumns: FeedColumnData[] = columns.map((column) => {
-		const linkedSources = column.sourceIds.map((sourceId) => feedSourceMap.get(sourceId)).filter((source): source is FeedSourceConfig => Boolean(source));
+		const linkedSources = column.sourceIds.map((sourceId) => configuredSourceMap.get(sourceId)).filter((source): source is FeedSourceConfig => Boolean(source));
 		const linkedSourceMap = buildSourceDataMap(linkedSources.map((source) => sourceMap.get(source.id)).filter((source): source is FeedSourceData => Boolean(source)));
 
 		return buildColumnData(column, linkedSourceMap);
@@ -107,9 +64,11 @@ export async function GET(request: NextRequest) {
 }
 
 export async function OPTIONS() {
+	const configuredSources = await getConfiguredFeedSources();
+
 	return NextResponse.json({
 		cacheMode: getPreferredCacheMode(),
 		columns: defaultFeedColumns.length,
-		sources: defaultFeedSources.length,
+		sources: configuredSources.length,
 	});
 }

@@ -8,53 +8,12 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 
-import { getCachedValue } from '@/lib/cache/feed-cache';
 import { buildColumnData, buildSourceDataMap } from '@/lib/feeds/compose';
-import { defaultFeedColumns, defaultFeedSources } from '@/lib/config/default-columns';
-import { fetchRedditSource } from '@/lib/feeds/reddit';
-import { fetchRssSource } from '@/lib/feeds/rss';
-import { fetchWebCrawlSource } from '@/lib/feeds/web-crawl';
+import { defaultFeedColumns } from '@/lib/config/default-columns';
+import { getConfiguredFeedSources } from '@/lib/config/source-registry';
+import { FeedSourceData } from '@/lib/feeds/types';
 import { generateRssXml } from '@/lib/feeds/rss-generator';
-import { FeedSourceConfig, FeedSourceData, FeedSourceResult } from '@/lib/feeds/types';
-
-async function fetchSourcePayload(source: FeedSourceConfig): Promise<FeedSourceResult> {
-	try {
-		if (source.kind === 'web-crawl') {
-			return await fetchWebCrawlSource(source);
-		}
-
-		if (source.kind === 'reddit') {
-			return await fetchRedditSource(source);
-		}
-
-		return await fetchRssSource(source);
-	} catch (error) {
-		const fetchedAt = new Date().toISOString();
-
-		return {
-			source,
-			items: [],
-			fetchedAt,
-			staleAt: new Date(Date.now() + 2 * 60_000).toISOString(),
-			error: {
-				sourceId: source.id,
-				message: error instanceof Error ? error.message : 'Unexpected feed ingestion error.',
-				retryable: true,
-			},
-		};
-	}
-}
-
-async function getSourceResult(source: FeedSourceConfig) {
-	const cacheKey = `feed-source:${source.id}`;
-	const ttlMs = source.pollMinutes * 60_000;
-	const isBackgroundCrawl = source.kind === 'web-crawl';
-
-	return getCachedValue(cacheKey, ttlMs, () => fetchSourcePayload(source), {
-		staleWhileRevalidateMs: isBackgroundCrawl ? 8 * 60_000 : 0,
-		refreshInBackground: isBackgroundCrawl,
-	});
-}
+import { getSourceResult } from '@/lib/feeds/source-runtime';
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ columnId: string }> }): Promise<NextResponse> {
 	try {
@@ -73,7 +32,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ colu
 
 		// Fetch sources for this column
 		const columnSourceIds = new Set(column.sourceIds);
-		const columnSources = defaultFeedSources.filter((source) => columnSourceIds.has(source.id));
+		const configuredSources = await getConfiguredFeedSources();
+		const columnSources = configuredSources.filter((source) => columnSourceIds.has(source.id));
 
 		// Fetch all source data
 		const sourceResults = await Promise.all(columnSources.map(getSourceResult));

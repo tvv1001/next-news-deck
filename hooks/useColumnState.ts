@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { PINNED_RIGHT_COLUMN_ID, RESERVED_CUSTOM_SOURCE_IDS } from '@/lib/config/default-columns';
 import { FeedColumnConfig } from '@/lib/feeds/types';
 
-const STORAGE_KEY = 'next-news-deck-ui-state:v1';
+const STORAGE_KEY = 'next-news-deck-ui-state:v2';
 
 interface PersistedColumnState {
 	visibleColumnIds?: string[];
@@ -51,6 +51,10 @@ function sanitizeCustomColumn(column: FeedColumnConfig) {
 		...column,
 		sourceIds,
 	};
+}
+
+function resetReadIdSet() {
+	return [] as string[];
 }
 
 export function useColumnState(defaultColumns: FeedColumnConfig[]) {
@@ -219,6 +223,14 @@ export function useColumnState(defaultColumns: FeedColumnConfig[]) {
 		});
 	}
 
+	function resetColumnState() {
+		setCustomColumns([]);
+		setOrderedColumnIds(defaultColumnIds);
+		setHiddenColumnIds([]);
+		setReadItemIds(resetReadIdSet());
+		window.localStorage.removeItem(STORAGE_KEY);
+	}
+
 	return {
 		hasHydrated,
 		orderedColumns,
@@ -231,5 +243,6 @@ export function useColumnState(defaultColumns: FeedColumnConfig[]) {
 		reorderColumns,
 		markItemRead,
 		toggleItemRead,
+		resetColumnState,
 	};
 }

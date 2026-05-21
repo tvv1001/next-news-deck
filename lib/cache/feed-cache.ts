@@ -79,6 +79,20 @@ async function storeCachedValue<T>(key: string, cacheMode: CacheMode, value: T, 
 	return previousValue;
 }
 
+export async function deleteCachedValue(key: string) {
+	backgroundRefreshes.delete(key);
+	memoryCache.delete(key);
+
+	const redis = getRedisClient();
+	if (redis) {
+		try {
+			await redis.del(key);
+		} catch (error) {
+			console.error(`Unable to delete Redis cache key ${key}.`, error);
+		}
+	}
+}
+
 function queueBackgroundRefresh<T>(key: string, loader: () => Promise<T>, ttlMs: number, staleWhileRevalidateMs: number, cacheMode: CacheMode, options: CacheOptions) {
 	if (backgroundRefreshes.has(key)) {
 		return false;

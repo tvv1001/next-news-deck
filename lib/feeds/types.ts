@@ -42,6 +42,17 @@ export interface FeedSourceConfig {
 	crawlEngine?: FeedSourceCrawlEngine;
 }
 
+export interface FeedSourceWithMeta extends FeedSourceConfig {
+	builtIn: boolean;
+	attachedColumnIds: string[];
+}
+
+export interface FeedSourceRegistryDocument {
+	version: 1;
+	upserts: FeedSourceConfig[];
+	deletedIds: string[];
+}
+
 export interface FeedColumnConfig {
 	id: string;
 	title: string;
@@ -113,4 +124,19 @@ export interface FeedLiveUpdate {
 	staleAt: string;
 	totalItems: number;
 	newItems: FeedItem[];
+}
+
+export interface FeedSourceTestResult {
+	sourceId: string;
+	sourceTitle: string;
+	kind: FeedSourceKind;
+	ok: boolean;
+	testedAt: string;
+	durationMs: number;
+	itemCount: number;
+	fetchedAt?: string;
+	staleAt?: string;
+	error?: string;
+	sampleTitles: string[];
+	sampleUrls: string[];
 }

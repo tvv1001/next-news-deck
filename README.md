@@ -17,7 +17,7 @@
 - Uses hydration-safe drag and drop for column reordering
 - Supports a crawler-backed watch lane using a small Scrapy bridge plus a built-in HTML fallback
 - Pushes live "new card ready" notifications over Server-Sent Events (SSE), with a slow fallback refresh instead of constant polling
-- Includes a dedicated `/sse-status` page for monitoring the SSE connection, heartbeats, and recent live-update payloads
+- Includes a dedicated `/sse-status` page for monitoring the SSE connection, heartbeats, recent live-update payloads, and source configuration/test controls
 
 ## Current stack
 
@@ -36,7 +36,7 @@
 2. Review `.env` and set `REDIS_URL` if you want Redis-backed caching.
 3. Start the development server with `pnpm dev`.
 4. Open the app in your browser and verify the feed columns load and the header shows `live updates on`.
-5. Optionally open `/sse-status` to inspect the live SSE connection and recent event activity.
+5. Optionally open `/sse-status` to inspect the live SSE connection, recent event activity, and edit/test RSS or crawl source definitions.
 
 ## Environment variables
 
@@ -107,12 +107,16 @@ OPML is a standard format for sharing RSS subscriptions. Use this to import all 
 
 `Crawl Watch` uses the `web-crawl` adapter with the small TypeScript Scrapy bridge in `lib/crawler/scrapy-runner.ts`. When Scrapy is unavailable, the adapter falls back to the built-in `cheerio` crawler. The default free watch query is `$TSLA`; the crawler is now seeded from Bing and Google search/news pages, mines inline JSON-LD or other structured data from the returned HTML, avoids quote/product landing pages, and follows relevant article-linked PDFs so filings and source documents can appear as cards.
 
+Editable source overrides are persisted in `data/feed-source-overrides.json`. Built-in source IDs can be reconfigured or temporarily removed from the diagnostics page without editing code directly.
+
 ### Important modules
 
 - `app/api/feeds/route.ts` — aggregated feed endpoint
 - `app/api/feeds/stream/route.ts` — SSE endpoint for push-based “new card ready” events
 - `app/api/health/route.ts` — cache and service health snapshot
-- `app/sse-status/page.tsx` — browser-based live monitor for SSE connectivity and events
+- `app/sse-status/page.tsx` — browser-based live monitor for SSE connectivity, events, and source-management controls
+- `app/api/source-configs/*` — CRUD and test endpoints for feed/crawl source definitions
+- `data/feed-source-overrides.json` — persisted runtime overrides for built-in and custom sources
 - `lib/config/default-columns.ts` — default sources and starter columns
 - `lib/feeds/types.ts` — canonical source, column, and item types
 - `lib/feeds/live-updates.ts` — in-process live update pub/sub and feed-change event generation
