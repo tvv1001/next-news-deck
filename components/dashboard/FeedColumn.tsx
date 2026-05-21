@@ -123,7 +123,7 @@ export function FeedColumn({ column, isLoading, readItemIds, onOpenItem, onToggl
 	const virtualizer = useVirtualizer({
 		count: visibleItems.length,
 		getScrollElement: () => parentRef.current,
-		estimateSize: () => 244,
+		estimateSize: () => 332,
 		overscan: 4,
 		getItemKey: (index) => visibleItems[index]?.id ?? `${column.id}-${index}`,
 	});

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { KeyboardEvent, useMemo, useState } from 'react';
 
 import { FeedItem } from '@/lib/feeds/types';
 
@@ -52,15 +52,30 @@ function isDirectVideoUrl(url: string) {
 
 export function FeedCard({ item, isRead, onOpen, onToggleRead }: FeedCardProps) {
 	const [isImageExpanded, setIsImageExpanded] = useState(false);
+	const [isTextExpanded, setIsTextExpanded] = useState(false);
 	const bodyPreview = item.content && item.content !== item.summary ? item.content : undefined;
+	const previewText = useMemo(() => {
+		if (bodyPreview) {
+			return item.summary && !bodyPreview.startsWith(item.summary) ? `${item.summary}\n\n${bodyPreview}` : bodyPreview;
+		}
+
+		return item.summary || 'Open the source to read the full story.';
+	}, [bodyPreview, item.summary]);
+
+	function handleTextKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+		if (event.key === 'Enter' || event.key === ' ') {
+			event.preventDefault();
+			setIsTextExpanded(true);
+		}
+	}
 
 	return (
 		<>
 			<article
-				className={`rounded-3xl border p-4 shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg ${
+				className={`rounded-3xl border p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg ${
 					isRead ? 'border-white/10 bg-slate-950/50 text-slate-400' : 'border-white/15 bg-slate-950/80 text-slate-50'
 				}`}>
-				<div className='mb-3 flex items-start justify-between gap-3'>
+				<div className='mb-4 flex items-start justify-between gap-3'>
 					<div>
 						<div className='flex flex-wrap items-center gap-2'>
 							<p className='text-xs font-medium uppercase tracking-[0.24em] text-cyan-300/90'>{item.sourceName}</p>
@@ -87,10 +102,10 @@ export function FeedCard({ item, isRead, onOpen, onToggleRead }: FeedCardProps) 
 					rel='noreferrer'
 					onClick={() => onOpen(item.id)}
 					className='group block'>
-					<h3 className='text-base font-semibold leading-6 text-balance transition group-hover:text-cyan-200'>{item.title}</h3>
+					<h3 className='text-lg font-semibold leading-7 text-balance transition group-hover:text-cyan-200'>{item.title}</h3>
 				</a>
 
-				<div className='mt-3 overflow-hidden'>
+				<div className='mt-4 overflow-hidden'>
 					{item.videoEmbedUrl || item.videoUrl ?
 						<div className='mb-3 overflow-hidden rounded-2xl border border-white/10 bg-slate-900/70'>
 							{item.videoEmbedUrl ?
@@ -126,7 +141,7 @@ export function FeedCard({ item, isRead, onOpen, onToggleRead }: FeedCardProps) 
 							type='button'
 							onClick={() => setIsImageExpanded(true)}
 							className={`group overflow-hidden rounded-2xl border border-white/10 bg-slate-900/70 text-left transition hover:border-cyan-300/40 ${
-								item.videoEmbedUrl || item.videoUrl ? 'mb-3 block w-full' : 'mb-2 mr-3 float-left w-2/5'
+								item.videoEmbedUrl || item.videoUrl ? 'mb-3 block w-full' : 'mb-3 mr-4 float-left w-[43%]'
 							}`}
 							aria-label={`Expand image for ${item.title}`}>
 							{/* eslint-disable-next-line @next/next/no-img-element -- third-party article images come from many dynamic remote domains. */}
@@ -140,21 +155,25 @@ export function FeedCard({ item, isRead, onOpen, onToggleRead }: FeedCardProps) 
 						</button>
 					:	null}
 
-					<a
-						href={item.url}
-						target='_blank'
-						rel='noreferrer'
-						onClick={() => onOpen(item.id)}
-						className='group block'>
-						<p className='line-clamp-4 text-sm leading-6 text-slate-300/90'>{item.summary || 'Open the source to read the full story.'}</p>
-					</a>
+					<div
+						tabIndex={0}
+						onClick={() => setIsTextExpanded(true)}
+						onFocus={() => setIsTextExpanded(true)}
+						onBlur={(event) => {
+							if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+								setIsTextExpanded(false);
+							}
+						}}
+						onKeyDown={handleTextKeyDown}
+						className={`mt-3 rounded-2xl border px-3 py-3 text-left outline-none transition ${
+							isTextExpanded ? 'border-cyan-300/30 bg-white/6 shadow-lg shadow-cyan-950/20' : 'border-white/8 bg-white/3 hover:border-cyan-300/20 focus:border-cyan-300/30'
+						}`}
+						aria-expanded={isTextExpanded}
+						aria-label={`Article text preview for ${item.title}`}>
+						<p className={`text-[15px] leading-7 text-slate-200/95 transition ${isTextExpanded ? 'line-clamp-none whitespace-pre-wrap' : 'line-clamp-9'}`}>{previewText}</p>
+					</div>
 
-					{bodyPreview ?
-						<details className='mt-3 rounded-2xl border border-white/8 bg-white/3 px-3 py-2 text-sm text-slate-200'>
-							<summary className='cursor-pointer list-none font-medium text-cyan-200 transition hover:text-cyan-100'>Read article text in feed</summary>
-							<p className='mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap leading-6 text-slate-300/90'>{bodyPreview}</p>
-						</details>
-					:	null}
+					<p className='mt-3 text-xs text-slate-500'>Source: {hostnameFromUrl(item.url)}</p>
 				</div>
 			</article>
 
