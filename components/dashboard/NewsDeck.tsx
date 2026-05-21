@@ -2,6 +2,7 @@
 
 import { DragEndEvent, DndContext, PointerSensor, closestCenter, useSensor, useSensors } from '@dnd-kit/core';
 import { SortableContext, horizontalListSortingStrategy } from '@dnd-kit/sortable';
+import Link from 'next/link';
 import { useMemo, useSyncExternalStore } from 'react';
 
 import { ColumnComposer } from '@/components/dashboard/ColumnComposer';
@@ -129,6 +130,11 @@ export function NewsDeck() {
 							disabled={isRefreshing}>
 							{isRefreshing ? 'Refreshing…' : 'Refresh'}
 						</button>
+						<Link
+							href='/sse-status'
+							className='rounded-full border border-white/10 bg-white/5 px-2.5 py-1 font-medium text-slate-100 transition hover:border-cyan-300/30 hover:text-white'>
+							SSE status
+						</Link>
 					</div>
 
 					<ColumnComposer

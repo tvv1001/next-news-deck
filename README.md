@@ -17,6 +17,7 @@
 - Uses hydration-safe drag and drop for column reordering
 - Supports a crawler-backed watch lane using a small Scrapy bridge plus a built-in HTML fallback
 - Pushes live "new card ready" notifications over Server-Sent Events (SSE), with a slow fallback refresh instead of constant polling
+- Includes a dedicated `/sse-status` page for monitoring the SSE connection, heartbeats, and recent live-update payloads
 
 ## Current stack
 
@@ -35,6 +36,7 @@
 2. Review `.env` and set `REDIS_URL` if you want Redis-backed caching.
 3. Start the development server with `pnpm dev`.
 4. Open the app in your browser and verify the feed columns load and the header shows `live updates on`.
+5. Optionally open `/sse-status` to inspect the live SSE connection and recent event activity.
 
 ## Environment variables
 
@@ -110,6 +112,7 @@ OPML is a standard format for sharing RSS subscriptions. Use this to import all 
 - `app/api/feeds/route.ts` — aggregated feed endpoint
 - `app/api/feeds/stream/route.ts` — SSE endpoint for push-based “new card ready” events
 - `app/api/health/route.ts` — cache and service health snapshot
+- `app/sse-status/page.tsx` — browser-based live monitor for SSE connectivity and events
 - `lib/config/default-columns.ts` — default sources and starter columns
 - `lib/feeds/types.ts` — canonical source, column, and item types
 - `lib/feeds/live-updates.ts` — in-process live update pub/sub and feed-change event generation
