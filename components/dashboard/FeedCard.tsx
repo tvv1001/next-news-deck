@@ -14,6 +14,10 @@ interface FeedCardProps {
 function formatTimestamp(timestamp: string) {
 	const date = new Date(timestamp);
 
+	if (Number.isNaN(date.getTime())) {
+		return 'Date unavailable';
+	}
+
 	return new Intl.DateTimeFormat('en', {
 		month: 'short',
 		day: 'numeric',
@@ -42,8 +46,13 @@ function discoveryLabel(source?: FeedItem['discoverySource']) {
 	return '';
 }
 
+function isDirectVideoUrl(url: string) {
+	return /\.(?:mp4|webm|ogg|m3u8)(?:$|[?#])/i.test(url);
+}
+
 export function FeedCard({ item, isRead, onOpen, onToggleRead }: FeedCardProps) {
 	const [isImageExpanded, setIsImageExpanded] = useState(false);
+	const bodyPreview = item.content && item.content !== item.summary ? item.content : undefined;
 
 	return (
 		<>
@@ -82,11 +91,43 @@ export function FeedCard({ item, isRead, onOpen, onToggleRead }: FeedCardProps) 
 				</a>
 
 				<div className='mt-3 overflow-hidden'>
+					{item.videoEmbedUrl || item.videoUrl ?
+						<div className='mb-3 overflow-hidden rounded-2xl border border-white/10 bg-slate-900/70'>
+							{item.videoEmbedUrl ?
+								<iframe
+									src={item.videoEmbedUrl}
+									title={`Embedded video for ${item.title}`}
+									className='aspect-video w-full'
+									allow='accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share'
+									allowFullScreen
+								/>
+							: item.videoUrl && isDirectVideoUrl(item.videoUrl) ?
+								<video
+									src={item.videoUrl}
+									controls
+									preload='metadata'
+									className='aspect-video w-full bg-black'
+								/>
+							: item.videoUrl ?
+								<a
+									href={item.videoUrl}
+									target='_blank'
+									rel='noreferrer'
+									onClick={() => onOpen(item.id)}
+									className='block px-3 py-2 text-sm font-medium text-cyan-200 transition hover:text-cyan-100'>
+									Open video
+								</a>
+							:	null}
+						</div>
+					:	null}
+
 					{item.imageUrl ?
 						<button
 							type='button'
 							onClick={() => setIsImageExpanded(true)}
-							className='group mb-2 mr-3 float-left w-2/5 overflow-hidden rounded-2xl border border-white/10 bg-slate-900/70 text-left transition hover:border-cyan-300/40'
+							className={`group overflow-hidden rounded-2xl border border-white/10 bg-slate-900/70 text-left transition hover:border-cyan-300/40 ${
+								item.videoEmbedUrl || item.videoUrl ? 'mb-3 block w-full' : 'mb-2 mr-3 float-left w-2/5'
+							}`}
 							aria-label={`Expand image for ${item.title}`}>
 							{/* eslint-disable-next-line @next/next/no-img-element -- third-party article images come from many dynamic remote domains. */}
 							<img
@@ -107,6 +148,13 @@ export function FeedCard({ item, isRead, onOpen, onToggleRead }: FeedCardProps) 
 						className='group block'>
 						<p className='line-clamp-4 text-sm leading-6 text-slate-300/90'>{item.summary || 'Open the source to read the full story.'}</p>
 					</a>
+
+					{bodyPreview ?
+						<details className='mt-3 rounded-2xl border border-white/8 bg-white/3 px-3 py-2 text-sm text-slate-200'>
+							<summary className='cursor-pointer list-none font-medium text-cyan-200 transition hover:text-cyan-100'>Read article text in feed</summary>
+							<p className='mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap leading-6 text-slate-300/90'>{bodyPreview}</p>
+						</details>
+					:	null}
 				</div>
 			</article>
 

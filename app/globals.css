@@ -41,3 +41,21 @@ body {
 	background: rgba(34, 211, 238, 0.35);
 	color: white;
 }
+
+@keyframes news-deck-card-slide-down {
+	0% {
+		opacity: 0;
+		transform: translateY(-18px) scale(0.985);
+	}
+
+	100% {
+		opacity: 1;
+		transform: translateY(0) scale(1);
+	}
+}
+
+.news-deck-card-enter {
+	animation: news-deck-card-slide-down 480ms cubic-bezier(0.22, 1, 0.36, 1);
+	transform-origin: top center;
+	will-change: transform, opacity;
+}

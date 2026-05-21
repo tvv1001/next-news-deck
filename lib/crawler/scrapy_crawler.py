@@ -29,6 +29,9 @@ except Exception:
     CrawlerProcess = None
 
 
+SpiderBase = scrapy.Spider if scrapy is not None else object
+
+
 MAX_TEXT_CHARS = 15000
 MAX_LINKS_PER_PAGE = 25
 
@@ -59,7 +62,7 @@ def _extract_allowed_domains(url: str, same_domain_only: bool) -> list[str]:
     return [value for value in domain_variants if value]
 
 
-class GenericSiteSpider(scrapy.Spider):
+class GenericSiteSpider(SpiderBase):
     name = "generic_site_spider"
 
     def __init__(self, start_url: str, max_pages: int = 100, same_domain_only: bool = True, *args, **kwargs):

@@ -16,6 +16,8 @@ interface ExtractedPage {
 	summary: string;
 	publishedAt: string;
 	imageUrl?: string;
+	videoUrl?: string;
+	videoEmbedUrl?: string;
 	text: string;
 	links: string[];
 	fallbackLinks: string[];
@@ -33,12 +35,16 @@ interface JsonLdObject {
 const DEFAULT_MAX_PAGES = 18;
 const DEFAULT_CRAWL_DEPTH = 4;
 const DEFAULT_MAX_ITEMS_PER_DOMAIN = 5;
+const MIN_FALLBACK_MATCHES = 4;
+const DESIRED_MIN_MATCHES = 8;
 const MAX_LINKS_PER_PAGE = 50;
 const MAX_ENRICHMENT_LINKS = 6;
+const MAX_SEED_FALLBACK_CANDIDATES = 18;
 const MAX_TEXT_LENGTH = 12_000;
 const MIN_BODY_CHARS = 280;
 const THIN_PAGE_TEXT_CHARS = 900;
 const SEARCH_DISCOVERY_MIN_PAGES = 12;
+const ARTICLE_TAIL_MARKERS = [/\bfrom our partners\b/i, /\bin other news\b/i, /\bshow comments\b/i, /\bcalculator and tools\b/i];
 
 // Domain-level rate limiting (ms between requests per domain)
 const DOMAIN_REQUEST_DELAY_MS = 300;
@@ -138,6 +144,15 @@ function toAbsoluteUrl(candidate: string, baseUrl: string) {
 	}
 }
 
+function sanitizeMediaUrl(candidate?: string, baseUrl?: string) {
+	if (!candidate) {
+		return undefined;
+	}
+
+	const resolved = toAbsoluteUrl(candidate.trim(), baseUrl ?? candidate.trim());
+	return resolved ?? undefined;
+}
+
 function normalizeHost(hostname: string) {
 	return hostname.replace(/^www\./i, '').toLowerCase();
 }
@@ -178,6 +193,10 @@ function canFollowOffsiteLinks(pageUrl: string) {
 
 function tokenizeQuery(query?: string) {
 	return [...new Set((query ?? '').toLowerCase().match(/[a-z0-9]{2,}/g) ?? [])];
+}
+
+function tokenizeSource(source: FeedSourceConfig) {
+	return [...new Set([...tokenizeQuery(source.query), ...tokenizeQuery(source.title), ...tokenizeQuery(source.description), ...source.tags.flatMap((tag) => tokenizeQuery(tag))])];
 }
 
 function shouldSkipUrl(candidate: string) {
@@ -267,8 +286,55 @@ function matchesAnyPattern(value: string, patterns: RegExp[]) {
 	return patterns.some((pattern) => pattern.test(value));
 }
 
-function shouldRejectPage(pageUrl: string, title: string, summary: string, text: string, publishedAt: string) {
+function shouldRejectPage(pageUrl: string, title: string, summary: string, text: string, publishedAt: string, options: { ignoreGenericTextPatterns?: boolean } = {}) {
 	const combined = `${title}\n${summary}\n${text.slice(0, 3000)}`;
+	const isLikelyThinPage = text.length < 1_600;
+
+	try {
+		const url = new URL(pageUrl);
+		const host = normalizeHost(url.hostname);
+		const normalizedUrl = `${host}${url.pathname}${url.search}`;
+
+		if (BLOCKED_COMMERCE_HOST_PATTERNS.some((pattern) => pattern.test(host))) {
+			return true;
+		}
+
+		if (matchesAnyPattern(normalizedUrl, BLOCKED_COMMERCE_URL_PATTERNS)) {
+			return true;
+		}
+
+		if (matchesAnyPattern(normalizedUrl, BLOCKED_STOCK_LANDING_URL_PATTERNS)) {
+			return true;
+		}
+	} catch {
+		return true;
+	}
+
+	if (matchesAnyPattern(combined, BLOCKED_COMMERCE_TEXT_PATTERNS) && isLikelyThinPage) {
+		return true;
+	}
+
+	if (matchesAnyPattern(combined, BLOCKED_STOCK_LANDING_TEXT_PATTERNS) && isLikelyThinPage) {
+		return true;
+	}
+
+	if (!options.ignoreGenericTextPatterns && matchesAnyPattern(combined, BLOCKED_GENERIC_TEXT_PATTERNS) && isLikelyThinPage) {
+		return true;
+	}
+
+	if (isStalePage(publishedAt)) {
+		return true;
+	}
+
+	if (summary.length > 0 && summary.length < 48 && !publishedAt) {
+		return true;
+	}
+
+	return false;
+}
+
+function shouldRejectDiscoverySnippet(pageUrl: string, title: string, summary: string) {
+	const combined = `${title}\n${summary}`;
 
 	try {
 		const url = new URL(pageUrl);
@@ -295,18 +361,6 @@ function shouldRejectPage(pageUrl: string, title: string, summary: string, text:
 	}
 
 	if (matchesAnyPattern(combined, BLOCKED_STOCK_LANDING_TEXT_PATTERNS)) {
-		return true;
-	}
-
-	if (matchesAnyPattern(combined, BLOCKED_GENERIC_TEXT_PATTERNS)) {
-		return true;
-	}
-
-	if (isStalePage(publishedAt)) {
-		return true;
-	}
-
-	if (summary.length > 0 && summary.length < 48 && !publishedAt) {
 		return true;
 	}
 
@@ -582,7 +636,7 @@ function readTitle($: ReturnType<typeof load>, structuredData: JsonLdObject[]) {
 }
 
 function readSummary($: ReturnType<typeof load>, structuredData: JsonLdObject[]) {
-	const paragraphs = $('article p, main p, p')
+	const paragraphs = $('.content-body p, .article-container p, .seamless-article p, article p, main p, p')
 		.toArray()
 		.map((element) => stripHtml($(element).text()))
 		.filter((value) => value.length > 80);
@@ -619,6 +673,42 @@ function readImageUrl($: ReturnType<typeof load>, pageUrl: string, structuredDat
 	return undefined;
 }
 
+function hasStructuredType(object: JsonLdObject, typeName: string) {
+	const value = object['@type'];
+
+	if (typeof value === 'string') {
+		return value.toLowerCase() === typeName.toLowerCase();
+	}
+
+	if (Array.isArray(value)) {
+		return value.some((entry) => typeof entry === 'string' && entry.toLowerCase() === typeName.toLowerCase());
+	}
+
+	return false;
+}
+
+function readVideoMetadata($: ReturnType<typeof load>, pageUrl: string, structuredData: JsonLdObject[]) {
+	const videoObjects = structuredData.filter((object) => hasStructuredType(object, 'VideoObject') || hasStructuredType(object, 'Clip'));
+	const embedCandidate =
+		readMeta($, ['meta[name="twitter:player"]']) ||
+		findStructuredUrl(videoObjects, ['embedUrl'], pageUrl) ||
+		sanitizeMediaUrl($('iframe[src]').first().attr('src') || '', pageUrl) ||
+		'';
+	const directCandidate =
+		readMeta($, ['meta[property="og:video:secure_url"]', 'meta[property="og:video:url"]', 'meta[property="og:video"]']) ||
+		findStructuredUrl(videoObjects, ['contentUrl', 'url'], pageUrl) ||
+		sanitizeMediaUrl($('video').first().attr('src') || $('video source').first().attr('src') || '', pageUrl) ||
+		'';
+
+	const embedUrl = sanitizeMediaUrl(embedCandidate, pageUrl);
+	const videoUrl = sanitizeMediaUrl(directCandidate, pageUrl);
+
+	return {
+		videoEmbedUrl: embedUrl && embedUrl !== pageUrl ? embedUrl : undefined,
+		videoUrl: videoUrl && videoUrl !== pageUrl && videoUrl !== embedUrl ? videoUrl : undefined,
+	};
+}
+
 function readPublishedAt($: ReturnType<typeof load>, structuredData: JsonLdObject[]) {
 	return toIsoDate(
 		readMeta($, [
@@ -638,11 +728,29 @@ function readBodyText($: ReturnType<typeof load>, structuredData: JsonLdObject[]
 	workingRoot(NOISE_SELECTORS.join(',')).remove();
 	const structuredBodyText = truncate(findStructuredText(structuredData, ['articleBody', 'text']), MAX_TEXT_LENGTH);
 
+	function trimTail(text: string) {
+		let trimmed = text;
+
+		for (const marker of ARTICLE_TAIL_MARKERS) {
+			const matchIndex = trimmed.search(marker);
+			if (matchIndex > 500) {
+				trimmed = trimmed.slice(0, matchIndex).trim();
+			}
+		}
+
+		return trimmed;
+	}
+
 	if (structuredBodyText.length >= MIN_BODY_CHARS) {
-		return structuredBodyText;
+		return trimTail(structuredBodyText);
 	}
 
 	const preferredSections = [
+		'.content-body',
+		'.article-container .content-body',
+		'.seamless-article .content-body',
+		'.article-container',
+		'.seamless-article',
 		'article [itemprop="articleBody"]',
 		'article',
 		'main article',
@@ -659,11 +767,11 @@ function readBodyText($: ReturnType<typeof load>, structuredData: JsonLdObject[]
 		const text = truncate(stripHtml(workingRoot(selector).first().text()), MAX_TEXT_LENGTH);
 
 		if (text.length >= MIN_BODY_CHARS) {
-			return text;
+			return trimTail(text);
 		}
 	}
 
-	return truncate(stripHtml(workingRoot('body').text()) || structuredBodyText, MAX_TEXT_LENGTH);
+	return trimTail(truncate(stripHtml(workingRoot('body').text()) || structuredBodyText, MAX_TEXT_LENGTH));
 }
 
 function scoreTextMatch(text: string, tokens: string[], weight: number) {
@@ -767,7 +875,14 @@ function extractLinks($: ReturnType<typeof load>, pageUrl: string, sameDomainOnl
 	return links;
 }
 
-function extractPage(html: string, pageUrl: string, source: FeedSourceConfig, tokens: string[], discoverySource?: FeedItem['discoverySource']): ExtractedPage | null {
+function extractPage(
+	html: string,
+	pageUrl: string,
+	source: FeedSourceConfig,
+	tokens: string[],
+	discoverySource?: FeedItem['discoverySource'],
+	options: { ignoreGenericTextPatterns?: boolean; skipRejectionChecks?: boolean } = {},
+): ExtractedPage | null {
 	const $ = load(html);
 	const structuredData = parseJsonLdBlocks($);
 	const canonicalUrl = readCanonicalUrl($, pageUrl, structuredData);
@@ -808,7 +923,7 @@ function extractPage(html: string, pageUrl: string, source: FeedSourceConfig, to
 	}
 
 	const publishedAt = readPublishedAt($, structuredData);
-	if (shouldRejectPage(canonicalUrl, title, summary, text, publishedAt)) {
+	if (!options.skipRejectionChecks && shouldRejectPage(canonicalUrl, title, summary, text, publishedAt, options)) {
 		return null;
 	}
 
@@ -820,6 +935,7 @@ function extractPage(html: string, pageUrl: string, source: FeedSourceConfig, to
 		summary,
 		publishedAt,
 		imageUrl: readImageUrl($, canonicalUrl, structuredData),
+		...readVideoMetadata($, canonicalUrl, structuredData),
 		text,
 		links: extractLinks($, canonicalUrl, source.sameDomainOnly ?? true, structuredUrls),
 		fallbackLinks: extractFallbackLinks($, canonicalUrl, tokens, structuredUrls),
@@ -838,11 +954,14 @@ function toFeedItem(page: ExtractedPage, source: FeedSourceConfig): FeedItem {
 		title: page.title,
 		url: page.url,
 		summary: page.summary,
+		content: page.text,
 		sourceId: source.id,
 		sourceName: source.title,
 		sourceKind: source.kind,
-		publishedAt: page.publishedAt,
+		publishedAt: toIsoDate(page.publishedAt),
 		imageUrl: page.imageUrl,
+		videoUrl: page.videoUrl,
+		videoEmbedUrl: page.videoEmbedUrl,
 		tags: [...new Set(source.tags)],
 		originFeedUrl: source.feedUrl,
 		discoverySource: page.discoverySource,
@@ -910,6 +1029,8 @@ async function fetchPdfFallback(candidateUrl: string, source: FeedSourceConfig, 
 			summary,
 			publishedAt: resolvedPublishedAt,
 			imageUrl: undefined,
+			videoUrl: undefined,
+			videoEmbedUrl: undefined,
 			text,
 			links: [],
 			fallbackLinks: [],
@@ -948,6 +1069,142 @@ async function fetchFallbackCandidatesFromPage(pageUrl: string, source: FeedSour
 	}
 }
 
+async function collectSeedFallbackMatches(source: FeedSourceConfig, tokens: string[], existingUrls: Set<string>) {
+	const matches: ExtractedPage[] = [];
+
+	for (const seedUrl of source.seedUrls?.filter(Boolean) ?? []) {
+		const discoverySource = classifyDiscoverySource(seedUrl);
+		const candidateUrls = await fetchFallbackCandidatesFromPage(seedUrl, source, tokens);
+
+		for (const candidateUrl of candidateUrls.slice(0, MAX_SEED_FALLBACK_CANDIDATES)) {
+			if (existingUrls.has(candidateUrl) || isSearchDiscoveryUrl(candidateUrl)) {
+				continue;
+			}
+
+			existingUrls.add(candidateUrl);
+			const extracted = await fetchFallbackPage(candidateUrl, source, tokens, discoverySource);
+			if (!extracted) {
+				continue;
+			}
+
+			const enrichedPage = await enrichThinPage(extracted, source, tokens);
+			if (enrichedPage.score >= 3 && (enrichedPage.articleLike || enrichedPage.text.length >= 500)) {
+				matches.push(enrichedPage);
+			}
+
+			if (matches.length >= source.maxItems) {
+				return matches;
+			}
+		}
+	}
+
+	return matches;
+}
+
+function extractSeedSnippetMatches(html: string, pageUrl: string, tokens: string[], discoverySource?: FeedItem['discoverySource']) {
+	const $ = load(html);
+	const pageHost = normalizeHost(new URL(pageUrl).hostname);
+	const matches = new Map<string, ExtractedPage>();
+
+	$('a[href]').each((_, element) => {
+		const href = $(element).attr('href');
+		if (!href) {
+			return;
+		}
+
+		const candidateUrl = toAbsoluteUrl(href, pageUrl);
+		if (!candidateUrl || isSearchDiscoveryUrl(candidateUrl) || shouldSkipFallbackUrl(candidateUrl)) {
+			return;
+		}
+
+		const candidateHost = normalizeHost(new URL(candidateUrl).hostname);
+		if (candidateHost === pageHost) {
+			return;
+		}
+
+		const visibleTitle = stripHtml($(element).text());
+		const title = truncate(visibleTitle || normalizeFallbackTitle(candidateUrl), 180);
+		if (title.length < 16) {
+			return;
+		}
+
+		const containerText = truncate(stripHtml($(element).parent().text() || $(element).closest('article, li, div').first().text()), 900);
+		const summary = truncate(containerText || title, 220);
+		const text = truncate(containerText || `${title}. ${summary}`, THIN_PAGE_TEXT_CHARS);
+		const relevanceScore = scoreTextMatch(`${title} ${summary} ${candidateUrl}`, tokens, 1);
+
+		if (!summary || relevanceScore <= 0 || shouldRejectDiscoverySnippet(candidateUrl, title, summary)) {
+			return;
+		}
+
+		const score = Math.max(4, scorePage(candidateUrl, title, summary, text, '', tokens, true));
+		const existing = matches.get(candidateUrl);
+		if (!existing || score > existing.score) {
+			matches.set(candidateUrl, {
+				title,
+				url: candidateUrl,
+				summary,
+				publishedAt: '',
+				imageUrl: undefined,
+				videoUrl: undefined,
+				videoEmbedUrl: undefined,
+				text,
+				links: [],
+				fallbackLinks: [],
+				score,
+				articleLike: true,
+				discoverySource,
+			});
+		}
+	});
+
+	return [...matches.values()].sort((left, right) => right.score - left.score).slice(0, MAX_SEED_FALLBACK_CANDIDATES);
+}
+
+async function collectSeedSnippetFallbackMatches(source: FeedSourceConfig, tokens: string[], existingUrls: Set<string>) {
+	const matches: ExtractedPage[] = [];
+
+	for (const seedUrl of source.seedUrls?.filter(Boolean) ?? []) {
+		try {
+			const response = await fetch(seedUrl, {
+				headers: buildHeaders(source),
+				next: { revalidate: 0 },
+				redirect: 'follow',
+			});
+
+			if (!response.ok) {
+				continue;
+			}
+
+			const contentType = response.headers.get('content-type') ?? '';
+			if (!contentType.includes('text/html') && !contentType.includes('application/xhtml+xml')) {
+				continue;
+			}
+
+			const finalUrl = response.url || seedUrl;
+			const html = await response.text();
+			const seedMatches = extractSeedSnippetMatches(html, finalUrl, tokens, classifyDiscoverySource(finalUrl));
+
+			for (const match of seedMatches) {
+				if (existingUrls.has(match.url)) {
+					continue;
+				}
+
+				existingUrls.add(match.url);
+				matches.push(match);
+
+				if (matches.length >= source.maxItems) {
+					return matches;
+				}
+			}
+		} catch {
+			continue;
+		}
+	}
+
+	return matches;
+}
+
 async function fetchFallbackPage(candidateUrl: string, source: FeedSourceConfig, tokens: string[], discoverySource?: FeedItem['discoverySource'], publishedAt?: string) {
 	if (isPdfUrl(candidateUrl)) {
 		return await fetchPdfFallback(candidateUrl, source, tokens, discoverySource, publishedAt);
@@ -975,7 +1232,10 @@ async function fetchFallbackPage(candidateUrl: string, source: FeedSourceConfig,
 
 		const html = await response.text();
 		const finalUrl = response.url || candidateUrl;
-		const extracted = extractPage(html, finalUrl, source, tokens, discoverySource);
+		const extracted =
+			extractPage(html, finalUrl, source, tokens, discoverySource) ||
+			extractPage(html, finalUrl, source, tokens, discoverySource, { ignoreGenericTextPatterns: true }) ||
+			extractPage(html, finalUrl, source, tokens, discoverySource, { ignoreGenericTextPatterns: true, skipRejectionChecks: true });
 		if (!extracted) {
 			return null;
 		}
@@ -1068,6 +1328,9 @@ function mapScrapyPage(page: ScrapyPage, source: FeedSourceConfig, tokens: strin
 		url: page.url,
 		summary,
 		publishedAt: '',
+		imageUrl: undefined,
+		videoUrl: undefined,
+		videoEmbedUrl: undefined,
 		text,
 		links: page.links,
 		fallbackLinks: page.links,
@@ -1204,9 +1467,20 @@ export async function fetchWebCrawlSource(source: FeedSourceConfig): Promise<Fee
 		throw new Error(`Web crawl source ${source.id} requires at least one seed URL.`);
 	}
 
-	const tokens = tokenizeQuery(source.query);
+	const tokens = tokenizeSource(source);
 	const preferredEngine = source.crawlEngine ?? 'cheerio';
-	const matches = preferredEngine === 'scrapy' ? await crawlWithScrapy(source, tokens).catch(() => crawlWithCheerio(source, tokens)) : await crawlWithCheerio(source, tokens);
+	let matches = preferredEngine === 'scrapy' ? await crawlWithScrapy(source, tokens).catch(() => crawlWithCheerio(source, tokens)) : await crawlWithCheerio(source, tokens);
+
+	if (matches.length < Math.min(MIN_FALLBACK_MATCHES, source.maxItems)) {
+		const fallbackMatches = await collectSeedFallbackMatches(source, tokens, new Set(matches.map((page) => page.url)));
+		matches = [...matches, ...fallbackMatches];
+	}
+
+	if (matches.length < Math.min(DESIRED_MIN_MATCHES, source.maxItems)) {
+		const snippetFallbackMatches = await collectSeedSnippetFallbackMatches(source, tokens, new Set(matches.map((page) => page.url)));
+		matches = [...matches, ...snippetFallbackMatches];
+	}
+
 	const rankedMatches = matches.sort((left, right) => {
 		if (right.score !== left.score) {
 			return right.score - left.score;

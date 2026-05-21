@@ -16,6 +16,8 @@ export interface FeedItem {
 	publishedAt: string;
 	author?: string;
 	imageUrl?: string;
+	videoUrl?: string;
+	videoEmbedUrl?: string;
 	tags: string[];
 	originFeedUrl: string;
 	discoverySource?: 'bing' | 'google';

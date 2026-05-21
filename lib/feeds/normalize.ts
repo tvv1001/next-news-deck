@@ -235,6 +235,17 @@ export function normalizeFeedItem(item: ParsedFeedItem, source: FeedSourceConfig
 	};
 }
 
+function feedItemRichnessScore(item: FeedItem) {
+	return (
+		(item.content?.length ?? 0) +
+		Math.round((item.summary?.length ?? 0) / 2) +
+		(item.imageUrl ? 500 : 0) +
+		(item.videoEmbedUrl ? 750 : 0) +
+		(item.videoUrl ? 600 : 0) +
+		(item.author ? 50 : 0)
+	);
+}
+
 export function dedupeAndSortFeedItems(items: FeedItem[]): FeedItem[] {
 	const deduped = new Map<string, FeedItem>();
 
@@ -246,12 +257,22 @@ export function dedupeAndSortFeedItems(items: FeedItem[]): FeedItem[] {
 			continue;
 		}
 
-		if (!existing.discoverySource && item.discoverySource) {
-			deduped.set(item.dedupeKey, {
-				...existing,
-				discoverySource: item.discoverySource,
-			});
-		}
+		const preferIncoming = feedItemRichnessScore(item) > feedItemRichnessScore(existing);
+		const preferred = preferIncoming ? item : existing;
+		const fallback = preferIncoming ? existing : item;
+
+		deduped.set(item.dedupeKey, {
+			...fallback,
+			...preferred,
+			summary: preferred.summary.length >= fallback.summary.length ? preferred.summary : fallback.summary,
+			content: (preferred.content?.length ?? 0) >= (fallback.content?.length ?? 0) ? preferred.content : fallback.content,
+			imageUrl: preferred.imageUrl ?? fallback.imageUrl,
+			videoUrl: preferred.videoUrl ?? fallback.videoUrl,
+			videoEmbedUrl: preferred.videoEmbedUrl ?? fallback.videoEmbedUrl,
+			author: preferred.author ?? fallback.author,
+			discoverySource: preferred.discoverySource ?? fallback.discoverySource,
+			tags: [...new Set([...(fallback.tags ?? []), ...(preferred.tags ?? [])])],
+		});
 	}
 
 	return [...deduped.values()].sort((left, right) => {

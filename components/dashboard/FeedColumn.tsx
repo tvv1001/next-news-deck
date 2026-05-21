@@ -1,10 +1,13 @@
 'use client';
 
-import { ReactNode, useRef } from 'react';
+import { ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 
 import { FeedColumnData } from '@/lib/feeds/types';
 import { FeedCard } from '@/components/dashboard/FeedCard';
+
+const CARD_REVEAL_DELAY_MS = 425;
+const CARD_REVEAL_ANIMATION_MS = 480;
 
 interface FeedColumnProps {
 	column: FeedColumnData;
@@ -17,13 +20,112 @@ interface FeedColumnProps {
 
 export function FeedColumn({ column, isLoading, readItemIds, onOpenItem, onToggleRead, headerActions }: FeedColumnProps) {
 	const parentRef = useRef<HTMLDivElement>(null);
+	const hasInitializedItemsRef = useRef(false);
+	const revealTimerRef = useRef<number | null>(null);
+	const animationTimersRef = useRef<Map<string, number>>(new Map());
+	const [revealedItemIds, setRevealedItemIds] = useState<string[]>([]);
+	const [pendingItemIds, setPendingItemIds] = useState<string[]>([]);
+	const [animatingItemIds, setAnimatingItemIds] = useState<string[]>([]);
+	const revealedItemIdsRef = useRef<string[]>([]);
+	const pendingItemIdsRef = useRef<string[]>([]);
+
+	useEffect(() => {
+		revealedItemIdsRef.current = revealedItemIds;
+	}, [revealedItemIds]);
+
+	useEffect(() => {
+		pendingItemIdsRef.current = pendingItemIds;
+	}, [pendingItemIds]);
+
+	useEffect(() => {
+		const incomingIds = column.items.map((item) => item.id);
+		const incomingIdSet = new Set(incomingIds);
+
+		if (!hasInitializedItemsRef.current) {
+			if (incomingIds.length === 0) {
+				return;
+			}
+
+			hasInitializedItemsRef.current = true;
+			setRevealedItemIds(incomingIds);
+			setPendingItemIds([]);
+			setAnimatingItemIds([]);
+			return;
+		}
+
+		const nextRevealedItemIds = revealedItemIdsRef.current.filter((itemId) => incomingIdSet.has(itemId));
+		const nextPendingBase = pendingItemIdsRef.current.filter((itemId) => incomingIdSet.has(itemId));
+		const knownItemIds = new Set([...nextRevealedItemIds, ...nextPendingBase]);
+		const unseenItemIds = incomingIds.filter((itemId) => !knownItemIds.has(itemId));
+		const pendingPool = new Set([...nextPendingBase, ...unseenItemIds]);
+		const nextPendingItemIds = incomingIds.filter((itemId) => pendingPool.has(itemId));
+
+		setRevealedItemIds(nextRevealedItemIds);
+		setPendingItemIds(nextPendingItemIds);
+		setAnimatingItemIds((current) => current.filter((itemId) => incomingIdSet.has(itemId)));
+	}, [column.items]);
+
+	useEffect(() => {
+		if (pendingItemIds.length === 0) {
+			if (revealTimerRef.current) {
+				window.clearTimeout(revealTimerRef.current);
+				revealTimerRef.current = null;
+			}
+
+			return;
+		}
+
+		revealTimerRef.current = window.setTimeout(() => {
+			const nextItemId = pendingItemIdsRef.current[0];
+			if (!nextItemId) {
+				return;
+			}
+
+			setPendingItemIds((current) => current.filter((itemId) => itemId !== nextItemId));
+			setRevealedItemIds((current) => (current.includes(nextItemId) ? current : [...current, nextItemId]));
+			setAnimatingItemIds((current) => (current.includes(nextItemId) ? current : [...current, nextItemId]));
+
+			const animationTimerId = window.setTimeout(() => {
+				setAnimatingItemIds((current) => current.filter((itemId) => itemId !== nextItemId));
+				animationTimersRef.current.delete(nextItemId);
+			}, CARD_REVEAL_ANIMATION_MS);
+
+			animationTimersRef.current.set(nextItemId, animationTimerId);
+			revealTimerRef.current = null;
+		}, CARD_REVEAL_DELAY_MS);
+
+		return () => {
+			if (revealTimerRef.current) {
+				window.clearTimeout(revealTimerRef.current);
+				revealTimerRef.current = null;
+			}
+		};
+	}, [pendingItemIds.length]);
+
+	useEffect(() => {
+		return () => {
+			if (revealTimerRef.current) {
+				window.clearTimeout(revealTimerRef.current);
+			}
+
+			for (const timerId of animationTimersRef.current.values()) {
+				window.clearTimeout(timerId);
+			}
+
+			animationTimersRef.current.clear();
+		};
+	}, []);
+
+	const revealedItemIdSet = useMemo(() => new Set(revealedItemIds), [revealedItemIds]);
+	const animatingItemIdSet = useMemo(() => new Set(animatingItemIds), [animatingItemIds]);
+	const visibleItems = useMemo(() => column.items.filter((item) => revealedItemIdSet.has(item.id)), [column.items, revealedItemIdSet]);
 	// eslint-disable-next-line react-hooks/incompatible-library -- TanStack Virtual is intentionally used here for bounded DOM rendering.
 	const virtualizer = useVirtualizer({
-		count: column.items.length,
+		count: visibleItems.length,
 		getScrollElement: () => parentRef.current,
 		estimateSize: () => 244,
 		overscan: 4,
-		getItemKey: (index) => column.items[index]?.id ?? `${column.id}-${index}`,
+		getItemKey: (index) => visibleItems[index]?.id ?? `${column.id}-${index}`,
 	});
 
 	return (
@@ -43,6 +145,9 @@ export function FeedColumn({ column, isLoading, readItemIds, onOpenItem, onToggl
 						{headerActions}
 						<div className='text-right text-[10px] text-slate-200/85'>
 							<p>{column.items.length} items</p>
+							{pendingItemIds.length > 0 ?
+								<p>{pendingItemIds.length} queued</p>
+							:	null}
 							<p>{column.cached ? 'cache' : 'live'}</p>
 						</div>
 					</div>
@@ -65,7 +170,7 @@ export function FeedColumn({ column, isLoading, readItemIds, onOpenItem, onToggl
 				className='relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-3'
 				role='feed'
 				aria-busy={isLoading}>
-				{column.items.length === 0 ?
+				{visibleItems.length === 0 ?
 					<div className='rounded-3xl border border-dashed border-white/10 bg-slate-950/50 p-6 text-sm text-slate-400'>
 						{isLoading ? 'Loading stories…' : 'No stories landed in this column yet. Try refreshing again in a moment.'}
 					</div>
@@ -76,14 +181,14 @@ export function FeedColumn({ column, isLoading, readItemIds, onOpenItem, onToggl
 							width: '100%',
 						}}>
 						{virtualizer.getVirtualItems().map((virtualItem) => {
-							const item = column.items[virtualItem.index];
+							const item = visibleItems[virtualItem.index];
 
 							return (
 								<div
 									key={virtualItem.key}
 									data-index={virtualItem.index}
 									ref={virtualizer.measureElement}
-									className='absolute left-0 top-0 w-full pb-4'
+									className={`absolute left-0 top-0 w-full pb-4 ${animatingItemIdSet.has(item.id) ? 'news-deck-card-enter' : ''}`}
 									style={{
 										transform: `translateY(${virtualItem.start}px)`,
 									}}>
