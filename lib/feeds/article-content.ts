@@ -71,6 +71,10 @@ const MIN_EXTRACTED_TEXT_LENGTH = 400; // Minimum chars to consider a valid extr
 
 const WHITESPACE_PATTERN = /\s+/g;
 const MIN_PARAGRAPH_CHARS = 40;
+const CSS_KEYWORD_PATTERN =
+	/\b(?:font-family|font-size|background(?:-color|-image)?|margin(?:-[a-z]+)?|padding(?:-[a-z]+)?|display|position|grid-template|grid-column|grid-row|flex(?:-[a-z]+)?|justify-content|align-items|border(?:-[a-z]+)?|color|width|height|min-width|max-width|min-height|max-height|line-height|z-index|opacity|transform|transition|animation)\s*:/i;
+const CSS_SELECTOR_BLOCK_PATTERN = /(?:^|\s)[.#]?[a-z][a-z0-9_-]*(?:\s+[.#]?[a-z][a-z0-9_-]*)*\s*\{[^}]+\}/i;
+const CSS_AT_RULE_PATTERN = /@(?:media|supports|keyframes|font-face|import)\b/i;
 
 type CheerioElement = Parameters<ReturnType<typeof load>>[0];
 
@@ -208,10 +212,36 @@ function normalizeWhitespace(text: string) {
 	return text.replace(WHITESPACE_PATTERN, ' ').trim();
 }
 
+function looksLikeCssText(text: string) {
+	const normalized = text.trim();
+	if (normalized.length < MIN_PARAGRAPH_CHARS) {
+		return false;
+	}
+
+	const cssSignalCount = [CSS_KEYWORD_PATTERN, CSS_SELECTOR_BLOCK_PATTERN, CSS_AT_RULE_PATTERN].filter((pattern) => pattern.test(normalized)).length;
+	const punctuationCount = (normalized.match(/[{};]/g) ?? []).length;
+	const wordCount = normalized.split(/\s+/).filter(Boolean).length;
+
+	if (cssSignalCount >= 2) {
+		return true;
+	}
+
+	if (cssSignalCount >= 1 && punctuationCount >= 6) {
+		return true;
+	}
+
+	return punctuationCount >= 12 && punctuationCount > wordCount / 2;
+}
+
+function sanitizeExtractedText(text: string) {
+	const normalized = normalizeWhitespace(text);
+	return looksLikeCssText(normalized) ? '' : normalized;
+}
+
 function extractTextFromElement($: ReturnType<typeof load>, element: CheerioElement) {
 	const paragraphs = $(element)
 		.find('p')
-		.map((_, node) => normalizeWhitespace($(node).text()))
+		.map((_, node) => sanitizeExtractedText($(node).text()))
 		.get()
 		.filter((text) => text.length >= MIN_PARAGRAPH_CHARS && !text.match(/^(share|follow|live|more)/i));
 
@@ -229,7 +259,7 @@ function extractTextFromElement($: ReturnType<typeof load>, element: CheerioElem
 	}
 
 	const html = $(element).html() ?? '';
-	return normalizeWhitespace(stripHtml(html));
+	return sanitizeExtractedText(stripHtml(html));
 }
 
 export function extractArticleText(html: string) {
@@ -265,7 +295,7 @@ export function extractArticleText(html: string) {
 		return bestCandidate;
 	}
 
-	const bodyText = normalizeWhitespace(stripHtml($('body').html() ?? ''));
+	const bodyText = sanitizeExtractedText(stripHtml($('body').html() ?? ''));
 	return bodyText.length > bestCandidate.length ? bodyText : bestCandidate;
 }
 
