@@ -2,7 +2,7 @@ import { load } from 'cheerio';
 
 import { runScrapyCrawler, ScrapyPage } from '@/lib/crawler/scrapy-runner';
 import { buildDedupeKey, dedupeAndSortFeedItems, sanitizeArticleImageUrl, stripHtml, toIsoDate, truncate } from '@/lib/feeds/normalize';
-import { FeedItem, FeedSourceConfig, FeedSourceResult } from '@/lib/feeds/types';
+import { FeedItem, FeedResourceLink, FeedSourceConfig, FeedSourceResult } from '@/lib/feeds/types';
 
 interface CrawlQueueItem {
 	url: string;
@@ -16,6 +16,7 @@ interface ExtractedPage {
 	summary: string;
 	publishedAt: string;
 	imageUrl?: string;
+	additionalImageUrls?: string[];
 	videoUrl?: string;
 	videoEmbedUrl?: string;
 	text: string;
@@ -24,12 +25,21 @@ interface ExtractedPage {
 	score: number;
 	articleLike: boolean;
 	discoverySource?: FeedItem['discoverySource'];
+	resourceLinks?: FeedResourceLink[];
 }
 
 type JsonLdValue = null | boolean | number | string | JsonLdObject | JsonLdValue[];
 
 interface JsonLdObject {
 	[key: string]: JsonLdValue;
+}
+
+interface EmbeddedArticlePayload {
+	title?: string;
+	summary?: string;
+	publishedAt?: string;
+	contentHtml?: string;
+	imageUrls?: string[];
 }
 
 const DEFAULT_MAX_PAGES = 18;
@@ -42,9 +52,17 @@ const MAX_ENRICHMENT_LINKS = 6;
 const MAX_SEED_FALLBACK_CANDIDATES = 18;
 const MAX_TEXT_LENGTH = 12_000;
 const MIN_BODY_CHARS = 280;
+const MIN_BODY_PARAGRAPHS_FOR_EXTRA_IMAGES = 3;
+const MIN_PARAGRAPH_TEXT_CHARS = 70;
+const MAX_ARTICLE_IMAGES = 5;
 const THIN_PAGE_TEXT_CHARS = 900;
 const SEARCH_DISCOVERY_MIN_PAGES = 12;
 const ARTICLE_TAIL_MARKERS = [/\bfrom our partners\b/i, /\bin other news\b/i, /\bshow comments\b/i, /\bcalculator and tools\b/i];
+const AI_SEARCH_MIN_TEXT_CHARS = 150;
+const BLOCKED_IMAGE_CONTEXT_PATTERNS = [
+	/\b(author|avatar|profile|logo|icon|badge|watermark|promo|advert|ad-|newsletter|share|social|sponsor|thumbnail|thumb|ticker|symbol|comment|user)\b/i,
+	/\b(seeking alpha|marketplace|premium|subscribe|follow)\b/i,
+];
 
 // Domain-level rate limiting (ms between requests per domain)
 const DOMAIN_REQUEST_DELAY_MS = 300;
@@ -246,27 +264,215 @@ function isSearchDiscoveryUrl(candidate: string) {
 	}
 }
 
+function decodeHtmlEntities(value = '') {
+	return String(value || '')
+		.replace(/&amp;/g, '&')
+		.replace(/&quot;/g, '"')
+		.replace(/&#39;/g, "'")
+		.replace(/&lt;/g, '<')
+		.replace(/&gt;/g, '>');
+}
+
+function decodeBingTarget(value: string | null | undefined = '') {
+	const raw = String(value || '').trim();
+	if (!raw) {
+		return '';
+	}
+
+	try {
+		if (/^a1/i.test(raw)) {
+			return Buffer.from(raw.slice(2), 'base64').toString('utf8');
+		}
+
+		return Buffer.from(raw, 'base64').toString('utf8');
+	} catch {
+		return '';
+	}
+}
+
+function normalizeRedirectUrl(value = '', baseUrl = '') {
+	const decoded = decodeHtmlEntities(value);
+	const absolute =
+		decoded.startsWith('//') ? `https:${decoded}`
+		: decoded.startsWith('/') && baseUrl ? new URL(decoded, baseUrl).toString()
+		: decoded;
+
+	try {
+		const url = new URL(absolute);
+		const yahooRedirectTarget = url.hostname.endsWith('search.yahoo.com') || url.hostname.endsWith('r.search.yahoo.com') ? url.pathname.match(/\/RU=([^/]+)\//i)?.[1] || '' : '';
+		const redirectTarget = yahooRedirectTarget || url.searchParams.get('q') || url.searchParams.get('uddg') || decodeBingTarget(url.searchParams.get('u'));
+		const finalUrl = redirectTarget ? decodeURIComponent(redirectTarget) : absolute;
+		return /^https?:/i.test(finalUrl) ? finalUrl : '';
+	} catch {
+		return /^https?:/i.test(absolute) ? absolute : '';
+	}
+}
+
+function normalizeAiText(value = '') {
+	return stripHtml(String(value || ''))
+		.replace(/^AI\s+(?:Overview|Summary)\s*/i, '')
+		.replace(/^Like\s+Dislike\s*/i, '')
+		.replace(/\bShow\s+(?:all|more)\s*$/i, '')
+		.replace(/\b(Read all|See all)\s*$/i, '')
+		.replace(/\s+/g, ' ')
+		.trim();
+}
+
+function scoreAiTextCandidate(text: string, discoverySource: FeedItem['discoverySource']) {
+	let score = text.length;
+
+	if (discoverySource === 'google' && /AI\s+Overview/i.test(text)) {
+		score += 600;
+	}
+
+	if (discoverySource === 'bing' && /(copilot|answer|summary)/i.test(text)) {
+		score += 300;
+	}
+
+	if (/\bshow\s+(?:all|more)\b/i.test(text)) {
+		score += 120;
+	}
+
+	if (/\bprivacy policy\b/i.test(text)) {
+		score -= 1200;
+	}
+
+	return score;
+}
+
+function isInternalSearchResultUrl(url = '') {
+	return /(?:google\.|bing\.|yahoo\.)/.test(url) && /\/(?:search|url|imgres|preferences|setprefs|advanced_search|account)/.test(url);
+}
+
+function isGooglePolicyUrl(url = '') {
+	return /https?:\/\/(?:policies|support)\.google\.com\//i.test(url);
+}
+
+function buildResourceLinkTitle(rawTitle: string, url: string) {
+	const normalizedTitle = normalizeAiText(rawTitle)
+		.replace(/\.?\s*Opens in new tab\.?$/i, '')
+		.trim();
+	if (normalizedTitle) {
+		return truncate(normalizedTitle, 120);
+	}
+
+	try {
+		return new URL(url).hostname.replace(/^www\./i, '');
+	} catch {
+		return truncate(url, 120);
+	}
+}
+
+function sourceLabelFromUrl(url: string) {
+	try {
+		return new URL(url).hostname.replace(/^www\./i, '');
+	} catch {
+		return '';
+	}
+}
+
+function extractAiResourceLinks($: ReturnType<typeof load>, pageUrl: string, discoverySource: FeedItem['discoverySource'], selectors: string[]) {
+	const links: FeedResourceLink[] = [];
+	const seen = new Set<string>();
+
+	for (const selector of selectors) {
+		$(selector)
+			.find('a[href]')
+			.each((_, element) => {
+				if (links.length >= 6) {
+					return false;
+				}
+
+				const url = normalizeRedirectUrl($(element).attr('href') || '', pageUrl);
+				if (!url || seen.has(url) || isInternalSearchResultUrl(url) || isGooglePolicyUrl(url) || isSearchDiscoveryUrl(url)) {
+					return;
+				}
+
+				const ariaLabel = $(element).attr('aria-label') || '';
+				const parentText = $(element).parent().text() || $(element).closest('article, div, li').first().text() || '';
+				const title = buildResourceLinkTitle($(element).text() || ariaLabel || parentText, url);
+				if (!title) {
+					return;
+				}
+
+				seen.add(url);
+				links.push({
+					title,
+					url,
+					sourceLabel: sourceLabelFromUrl(url),
+				});
+			});
+
+		if (links.length >= 6) {
+			break;
+		}
+	}
+
+	if (discoverySource === 'google' && links.length === 0) {
+		$('[data-container-id="rhs-col"] a[href]').each((_, element) => {
+			if (links.length >= 6) {
+				return false;
+			}
+
+			const url = normalizeRedirectUrl($(element).attr('href') || '', pageUrl);
+			if (!url || seen.has(url) || isInternalSearchResultUrl(url) || isGooglePolicyUrl(url) || isSearchDiscoveryUrl(url)) {
+				return;
+			}
+
+			seen.add(url);
+			links.push({
+				title: buildResourceLinkTitle($(element).attr('aria-label') || $(element).text(), url),
+				url,
+				sourceLabel: sourceLabelFromUrl(url),
+			});
+		});
+	}
+
+	return links;
+}
+
 function extractAiSearchSnippet($: ReturnType<typeof load>, pageUrl: string) {
 	const discoverySource = classifyDiscoverySource(pageUrl);
 	if (!discoverySource) {
 		return null;
 	}
 
-	const aiSnippetSelectors = ['.b_ans', '[data-attrid="ai_overview"]', '.ai-generated', '[data-component="ai-summary"]'];
+	if (discoverySource === 'bing') {
+		return null;
+	}
+
+	const aiSnippetSelectors =
+		discoverySource === 'google' ?
+			['#m-x-content', '#kAp9Ze', "div[jsname='yEVEwb']", 'div[data-processed="true"]', '[data-attrid="ai_overview"]', '.ai-generated', '[data-component="ai-summary"]']
+		:	['#b_sydtop', 'li.b_ans.b_top', 'li.b_ans', '.b_wc .b_ptxt', '.ai-generated', '[data-component="ai-summary"]'];
+	let bestText = '';
+	let bestScore = Number.NEGATIVE_INFINITY;
+	let bestSelector = '';
 
 	for (const selector of aiSnippetSelectors) {
-		const snippet = $(selector).first();
-		if (!snippet.length) {
-			continue;
-		}
+		for (const snippet of $(selector).toArray()) {
+			const text = normalizeAiText($(snippet).text());
+			if (text.length < AI_SEARCH_MIN_TEXT_CHARS) {
+				continue;
+			}
 
-		const text = stripHtml(snippet.text());
-		if (text.length >= 150) {
-			return text;
+			const score = scoreAiTextCandidate(text, discoverySource);
+			if (score > bestScore) {
+				bestText = text;
+				bestScore = score;
+				bestSelector = selector;
+			}
 		}
 	}
 
-	return null;
+	if (!bestText) {
+		return null;
+	}
+
+	return {
+		text: bestText,
+		resourceLinks: extractAiResourceLinks($, pageUrl, discoverySource, [bestSelector || aiSnippetSelectors[0]]),
+	};
 }
 
 function isStalePage(publishedAt: string) {
@@ -418,6 +624,78 @@ function parseJsonLdBlocks($: ReturnType<typeof load>) {
 	});
 
 	return objects;
+}
+
+function isSeekingAlphaArticleUrl(pageUrl: string) {
+	try {
+		const parsed = new URL(pageUrl);
+		const host = normalizeHost(parsed.hostname);
+		return host.endsWith('seekingalpha.com') && parsed.pathname.startsWith('/article/');
+	} catch {
+		return false;
+	}
+}
+
+function extractSeekingAlphaPayload($: ReturnType<typeof load>, pageUrl: string): EmbeddedArticlePayload | null {
+	if (!isSeekingAlphaArticleUrl(pageUrl)) {
+		return null;
+	}
+
+	for (const script of $('script').toArray()) {
+		const scriptText = $(script).html() || $(script).text() || '';
+		const marker = 'window.SSR_DATA = ';
+		const markerIndex = scriptText.indexOf(marker);
+		if (markerIndex < 0) {
+			continue;
+		}
+
+		const payload = scriptText
+			.slice(markerIndex + marker.length)
+			.trim()
+			.replace(/;\s*$/, '');
+
+		try {
+			const parsed = JSON.parse(payload) as {
+				article?: {
+					response?: {
+						data?: {
+							attributes?: {
+								title?: string;
+								summary?: string[];
+								publishOn?: string;
+								content?: string;
+								gettyImageUrl?: string;
+							};
+						};
+					};
+				};
+			};
+			const attributes = parsed.article?.response?.data?.attributes;
+			if (!attributes) {
+				continue;
+			}
+
+			const imageUrls = [attributes.gettyImageUrl].filter(Boolean) as string[];
+
+			return {
+				title: stripHtml(attributes.title ?? ''),
+				summary: truncate(
+					(attributes.summary ?? [])
+						.map((entry) => stripHtml(entry))
+						.filter(Boolean)
+						.join(' '),
+					220,
+				),
+				publishedAt: attributes.publishOn,
+				contentHtml: attributes.content,
+				imageUrls,
+			};
+		} catch {
+			continue;
+		}
+	}
+
+	return null;
 }
 
 function firstJsonLdText(value: JsonLdValue): string {
@@ -654,23 +932,329 @@ function readSummary($: ReturnType<typeof load>, structuredData: JsonLdObject[])
 	);
 }
 
-function readImageUrl($: ReturnType<typeof load>, pageUrl: string, structuredData: JsonLdObject[]) {
-	const candidates = [
-		readMeta($, ['meta[property="og:image"]', 'meta[name="twitter:image"]']),
-		findStructuredUrl(structuredData, ['image', 'thumbnailUrl'], pageUrl),
-		$('article img').first().attr('src') || '',
-		$('main img').first().attr('src') || '',
-		$('img').first().attr('src') || '',
-	];
+function extractParagraphsFromHtml(html: string) {
+	const contentRoot = load(`<div>${html}</div>`);
+	contentRoot(NOISE_SELECTORS.join(',')).remove();
+	contentRoot('figure, figcaption, .inline_ad_placeholder, .ad, .ads, .advertisement').remove();
 
-	for (const candidate of candidates) {
-		const sanitized = sanitizeArticleImageUrl(candidate, pageUrl);
-		if (sanitized) {
-			return sanitized;
+	const paragraphs = contentRoot('p, li')
+		.toArray()
+		.map((element) => stripHtml(contentRoot(element).text()))
+		.map((paragraph) => paragraph.trim())
+		.filter((paragraph) => paragraph.length >= 30 || paragraph.split(/\s+/).length >= 6);
+
+	if (paragraphs.length > 0) {
+		return paragraphs;
+	}
+
+	const text = truncate(stripHtml(contentRoot.root().text()), MAX_TEXT_LENGTH);
+	return splitTextIntoParagraphs(text);
+}
+
+function normalizeImageIdentity(candidate: string) {
+	try {
+		const url = new URL(candidate);
+		return `${url.origin}${url.pathname}`.toLowerCase();
+	} catch {
+		return candidate.trim().toLowerCase();
+	}
+}
+
+function readNumericAttribute(value?: string) {
+	if (!value) {
+		return undefined;
+	}
+
+	const numeric = Number.parseInt(value, 10);
+	return Number.isFinite(numeric) ? numeric : undefined;
+}
+
+function pickBestSrcSetCandidate(candidate?: string) {
+	if (!candidate) {
+		return '';
+	}
+
+	let bestUrl = '';
+	let bestWidth = -1;
+
+	for (const entry of candidate.split(',')) {
+		const [url = '', descriptor = ''] = entry.trim().split(/\s+/, 2);
+		if (!url) {
+			continue;
+		}
+
+		const descriptorWidth = descriptor.endsWith('w') ? Number.parseInt(descriptor.slice(0, -1), 10) : 0;
+		if (descriptorWidth >= bestWidth) {
+			bestUrl = url;
+			bestWidth = descriptorWidth;
 		}
 	}
 
-	return undefined;
+	return bestUrl;
+}
+
+function scoreImageCandidate(candidateUrl: string, selector: string, position: number, contextText: string, width?: number, height?: number) {
+	const combinedContext = `${candidateUrl} ${contextText}`.toLowerCase();
+
+	if (BLOCKED_IMAGE_CONTEXT_PATTERNS.some((pattern) => pattern.test(combinedContext))) {
+		return Number.NEGATIVE_INFINITY;
+	}
+
+	if ((width && width < 220) || (height && height < 160)) {
+		return Number.NEGATIVE_INFINITY;
+	}
+
+	let score = 0;
+
+	if (selector.includes('figure')) {
+		score += 20;
+	}
+
+	if (selector.includes('article') || selector.includes('content') || selector.includes('entry') || selector.includes('post')) {
+		score += 12;
+	}
+
+	if (position === 0) {
+		score += 8;
+	}
+
+	if (width && width >= 1200) {
+		score += 10;
+	} else if (width && width >= 800) {
+		score += 6;
+	} else if (width && width >= 480) {
+		score += 3;
+	}
+
+	if (height && height >= 300) {
+		score += 2;
+	}
+
+	if (/getty|image_\d{6,}|hero|featured|lead/i.test(candidateUrl)) {
+		score += 6;
+	}
+
+	if (/w(?:240|320|360)(?:\b|[^\d])/i.test(candidateUrl)) {
+		score -= 6;
+	}
+
+	return score;
+}
+
+function collectRankedImageCandidates($: ReturnType<typeof load>, pageUrl: string, selectors: string[], baseScore = 0) {
+	const ranked = new Map<string, { url: string; score: number }>();
+
+	for (const selector of selectors) {
+		$(selector).each((position, element) => {
+			const image = $(element);
+			const candidateUrl =
+				pickBestSrcSetCandidate(image.attr('srcset') || image.attr('data-srcset') || '') ||
+				image.attr('src') ||
+				image.attr('data-src') ||
+				image.attr('data-lazy-src') ||
+				image.attr('data-original') ||
+				image.attr('data-image') ||
+				'';
+			const sanitized = sanitizeArticleImageUrl(candidateUrl, pageUrl);
+			if (!sanitized) {
+				return;
+			}
+
+			const contextText = [image.attr('alt'), image.attr('title'), image.attr('class'), image.parent().attr('class'), image.closest('figure, div, aside').attr('class')]
+				.filter(Boolean)
+				.join(' ');
+			const width = readNumericAttribute(image.attr('width'));
+			const height = readNumericAttribute(image.attr('height'));
+			const score = scoreImageCandidate(sanitized, selector, position, contextText, width, height) + baseScore;
+			if (!Number.isFinite(score)) {
+				return;
+			}
+
+			const identity = normalizeImageIdentity(sanitized);
+			const existing = ranked.get(identity);
+			if (!existing || score > existing.score) {
+				ranked.set(identity, { url: sanitized, score });
+			}
+		});
+	}
+
+	return [...ranked.values()].sort((left, right) => right.score - left.score);
+}
+
+function trimArticleTail(text: string) {
+	let trimmed = text;
+
+	for (const marker of ARTICLE_TAIL_MARKERS) {
+		const matchIndex = trimmed.search(marker);
+		if (matchIndex > 500) {
+			trimmed = trimmed.slice(0, matchIndex).trim();
+		}
+	}
+
+	return trimmed;
+}
+
+function splitTextIntoParagraphs(text: string) {
+	const normalized = text.replace(/\r/g, '').trim();
+	if (!normalized) {
+		return [];
+	}
+
+	const explicitParagraphs = normalized
+		.split(/\n{2,}/)
+		.map((paragraph) => stripHtml(paragraph))
+		.map((paragraph) => paragraph.trim())
+		.filter(Boolean);
+
+	if (explicitParagraphs.length > 1) {
+		return explicitParagraphs;
+	}
+
+	const sentences =
+		normalized
+			.match(/[^.!?]+(?:[.!?](?=\s|$)|$)/g)
+			?.map((sentence) => sentence.trim())
+			.filter(Boolean) ?? [];
+
+	if (sentences.length >= 4) {
+		const paragraphs: string[] = [];
+		for (let index = 0; index < sentences.length; index += 3) {
+			paragraphs.push(
+				sentences
+					.slice(index, index + 3)
+					.join(' ')
+					.trim(),
+			);
+		}
+
+		return paragraphs.filter(Boolean);
+	}
+
+	return [stripHtml(normalized)];
+}
+
+function readBodyParagraphs($: ReturnType<typeof load>, structuredData: JsonLdObject[]) {
+	const embeddedArticlePayload = extractSeekingAlphaPayload($, readCanonicalUrl($, '', structuredData));
+	if (embeddedArticlePayload?.contentHtml) {
+		const embeddedParagraphs = extractParagraphsFromHtml(embeddedArticlePayload.contentHtml);
+		if (embeddedParagraphs.join(' ').length >= MIN_BODY_CHARS) {
+			return embeddedParagraphs;
+		}
+	}
+
+	const workingRoot = load($.html());
+	workingRoot(NOISE_SELECTORS.join(',')).remove();
+	const structuredBodyText = truncate(findStructuredText(structuredData, ['articleBody', 'text']), MAX_TEXT_LENGTH);
+	const trimmedStructuredBodyText = trimArticleTail(structuredBodyText);
+	const structuredParagraphs = splitTextIntoParagraphs(trimmedStructuredBodyText);
+
+	if (trimmedStructuredBodyText.length >= MIN_BODY_CHARS && structuredParagraphs.length > 0) {
+		return structuredParagraphs;
+	}
+
+	const preferredSections = [
+		'.content-body',
+		'.article-container .content-body',
+		'.seamless-article .content-body',
+		'.article-container',
+		'.seamless-article',
+		'article [itemprop="articleBody"]',
+		'article',
+		'main article',
+		'main',
+		'[role="main"]',
+		'.post-content',
+		'.entry-content',
+		'.article-body',
+		'.story-body',
+		'body',
+	];
+
+	for (const selector of preferredSections) {
+		const section = workingRoot(selector).first();
+		if (!section.length) {
+			continue;
+		}
+
+		const paragraphText = section
+			.find('p')
+			.toArray()
+			.map((element) => stripHtml(workingRoot(element).text()))
+			.map((paragraph) => paragraph.trim())
+			.filter((paragraph) => paragraph.length >= MIN_PARAGRAPH_TEXT_CHARS);
+		const normalizedParagraphs = splitTextIntoParagraphs(trimArticleTail(truncate(paragraphText.join('\n\n'), MAX_TEXT_LENGTH)));
+
+		if (normalizedParagraphs.length > 0 && normalizedParagraphs.join(' ').length >= MIN_BODY_CHARS) {
+			return normalizedParagraphs;
+		}
+
+		const sectionText = trimArticleTail(truncate(stripHtml(section.text()), MAX_TEXT_LENGTH));
+		if (sectionText.length >= MIN_BODY_CHARS) {
+			return splitTextIntoParagraphs(sectionText);
+		}
+	}
+
+	return splitTextIntoParagraphs(trimArticleTail(truncate(stripHtml(workingRoot('body').text()) || structuredBodyText, MAX_TEXT_LENGTH)));
+}
+
+function readImageUrls($: ReturnType<typeof load>, pageUrl: string, structuredData: JsonLdObject[], paragraphCount: number) {
+	const maxImages = paragraphCount >= MIN_BODY_PARAGRAPHS_FOR_EXTRA_IMAGES ? MAX_ARTICLE_IMAGES : 1;
+	const embeddedArticlePayload = extractSeekingAlphaPayload($, pageUrl);
+	const rankedCandidates = new Map<string, { url: string; score: number }>();
+
+	function addRankedCandidate(candidate?: string, score = 0) {
+		const sanitized = sanitizeArticleImageUrl(candidate, pageUrl);
+		if (!sanitized) {
+			return;
+		}
+
+		const identity = normalizeImageIdentity(sanitized);
+		const existing = rankedCandidates.get(identity);
+		if (!existing || score > existing.score) {
+			rankedCandidates.set(identity, { url: sanitized, score });
+		}
+	}
+
+	for (const candidate of embeddedArticlePayload?.imageUrls ?? []) {
+		addRankedCandidate(candidate, 120);
+	}
+
+	if (embeddedArticlePayload?.contentHtml) {
+		const embeddedRoot = load(`<article>${embeddedArticlePayload.contentHtml}</article>`);
+		for (const candidate of collectRankedImageCandidates(embeddedRoot, pageUrl, ['article figure img', 'article img'], 40)) {
+			addRankedCandidate(candidate.url, candidate.score);
+		}
+	}
+
+	for (const candidate of [readMeta($, ['meta[property="og:image"]', 'meta[name="twitter:image"]']), findStructuredUrl(structuredData, ['image', 'thumbnailUrl'], pageUrl)]) {
+		addRankedCandidate(candidate, 80);
+	}
+
+	for (const candidate of collectRankedImageCandidates(
+		$,
+		pageUrl,
+		[
+			'article figure img',
+			'.content-body figure img',
+			'.article-body figure img',
+			'.entry-content figure img',
+			'.post-content figure img',
+			'article img',
+			'.content-body img',
+			'.article-body img',
+			'.entry-content img',
+			'.post-content img',
+			'main figure img',
+		],
+		0,
+	)) {
+		addRankedCandidate(candidate.url, candidate.score);
+	}
+
+	return [...rankedCandidates.values()]
+		.sort((left, right) => right.score - left.score)
+		.map((entry) => entry.url)
+		.slice(0, maxImages);
 }
 
 function hasStructuredType(object: JsonLdObject, typeName: string) {
@@ -721,57 +1305,6 @@ function readPublishedAt($: ReturnType<typeof load>, structuredData: JsonLdObjec
 			'time[datetime]',
 		]) || findStructuredText(structuredData, ['datePublished', 'dateModified', 'dateCreated']),
 	);
-}
-
-function readBodyText($: ReturnType<typeof load>, structuredData: JsonLdObject[]) {
-	const workingRoot = load($.html());
-	workingRoot(NOISE_SELECTORS.join(',')).remove();
-	const structuredBodyText = truncate(findStructuredText(structuredData, ['articleBody', 'text']), MAX_TEXT_LENGTH);
-
-	function trimTail(text: string) {
-		let trimmed = text;
-
-		for (const marker of ARTICLE_TAIL_MARKERS) {
-			const matchIndex = trimmed.search(marker);
-			if (matchIndex > 500) {
-				trimmed = trimmed.slice(0, matchIndex).trim();
-			}
-		}
-
-		return trimmed;
-	}
-
-	if (structuredBodyText.length >= MIN_BODY_CHARS) {
-		return trimTail(structuredBodyText);
-	}
-
-	const preferredSections = [
-		'.content-body',
-		'.article-container .content-body',
-		'.seamless-article .content-body',
-		'.article-container',
-		'.seamless-article',
-		'article [itemprop="articleBody"]',
-		'article',
-		'main article',
-		'main',
-		'[role="main"]',
-		'.post-content',
-		'.entry-content',
-		'.article-body',
-		'.story-body',
-		'body',
-	];
-
-	for (const selector of preferredSections) {
-		const text = truncate(stripHtml(workingRoot(selector).first().text()), MAX_TEXT_LENGTH);
-
-		if (text.length >= MIN_BODY_CHARS) {
-			return trimTail(text);
-		}
-	}
-
-	return trimTail(truncate(stripHtml(workingRoot('body').text()) || structuredBodyText, MAX_TEXT_LENGTH));
 }
 
 function scoreTextMatch(text: string, tokens: string[], weight: number) {
@@ -892,8 +1425,9 @@ function extractPage(
 		const aiSnippet = extractAiSearchSnippet($, canonicalUrl);
 		if (aiSnippet) {
 			const snippetTitle = `AI Summary: ${source.query ?? 'Search Results'}`;
-			const snippetSummary = truncate(aiSnippet, 220);
-			const snippetText = truncate(aiSnippet, MAX_TEXT_LENGTH);
+			const snippetSummary = truncate(aiSnippet.text, 220);
+			const snippetText = truncate(aiSnippet.text, MAX_TEXT_LENGTH);
+			const resourceLinks = aiSnippet.resourceLinks.slice(0, 6);
 
 			return {
 				title: snippetTitle,
@@ -902,11 +1436,12 @@ function extractPage(
 				publishedAt: new Date().toISOString(),
 				imageUrl: undefined,
 				text: snippetText,
-				links: [],
-				fallbackLinks: [],
+				links: resourceLinks.map((link) => link.url),
+				fallbackLinks: resourceLinks.map((link) => link.url),
 				score: 15,
 				articleLike: true,
 				discoverySource,
+				resourceLinks,
 			};
 		}
 
@@ -914,27 +1449,31 @@ function extractPage(
 	}
 
 	const title = readTitle($, structuredData);
-	const summary = readSummary($, structuredData);
-	const text = readBodyText($, structuredData);
+	const embeddedArticlePayload = extractSeekingAlphaPayload($, canonicalUrl);
+	const summary = embeddedArticlePayload?.summary || readSummary($, structuredData);
+	const bodyParagraphs = readBodyParagraphs($, structuredData);
+	const text = bodyParagraphs.join('\n\n');
 	const articleLike = Boolean($('article').length || $('[itemprop="articleBody"]').length || $('meta[property="article:published_time"]').length || $('time[datetime]').length);
 
 	if (!title || !text) {
 		return null;
 	}
 
-	const publishedAt = readPublishedAt($, structuredData);
+	const publishedAt = embeddedArticlePayload?.publishedAt ? toIsoDate(embeddedArticlePayload.publishedAt) : readPublishedAt($, structuredData);
 	if (!options.skipRejectionChecks && shouldRejectPage(canonicalUrl, title, summary, text, publishedAt, options)) {
 		return null;
 	}
 
 	const score = scorePage(canonicalUrl, title, summary, text, publishedAt, tokens, articleLike);
+	const imageUrls = readImageUrls($, canonicalUrl, structuredData, bodyParagraphs.length);
 
 	return {
 		title,
 		url: canonicalUrl,
 		summary,
 		publishedAt,
-		imageUrl: readImageUrl($, canonicalUrl, structuredData),
+		imageUrl: imageUrls[0],
+		additionalImageUrls: imageUrls.slice(1),
 		...readVideoMetadata($, canonicalUrl, structuredData),
 		text,
 		links: extractLinks($, canonicalUrl, source.sameDomainOnly ?? true, structuredUrls),
@@ -942,6 +1481,7 @@ function extractPage(
 		score,
 		articleLike,
 		discoverySource,
+		resourceLinks: undefined,
 	};
 }
 
@@ -960,11 +1500,13 @@ function toFeedItem(page: ExtractedPage, source: FeedSourceConfig): FeedItem {
 		sourceKind: source.kind,
 		publishedAt: toIsoDate(page.publishedAt),
 		imageUrl: page.imageUrl,
+		additionalImageUrls: page.additionalImageUrls,
 		videoUrl: page.videoUrl,
 		videoEmbedUrl: page.videoEmbedUrl,
 		tags: [...new Set(source.tags)],
 		originFeedUrl: source.feedUrl,
 		discoverySource: page.discoverySource,
+		resourceLinks: page.resourceLinks,
 	};
 }
 
@@ -1191,7 +1733,17 @@ async function collectSeedSnippetFallbackMatches(source: FeedSourceConfig, token
 				}
 
 				existingUrls.add(match.url);
-				matches.push(match);
+
+				const extractedMatch = await fetchFallbackPage(match.url, source, tokens, match.discoverySource, match.publishedAt);
+				if (extractedMatch) {
+					const enrichedMatch = await enrichThinPage(extractedMatch, source, tokens);
+					matches.push({
+						...enrichedMatch,
+						discoverySource: match.discoverySource ?? enrichedMatch.discoverySource,
+					});
+				} else {
+					matches.push(match);
+				}
 
 				if (matches.length >= source.maxItems) {
 					return matches;

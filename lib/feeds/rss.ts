@@ -71,6 +71,7 @@ async function enrichRssItemsWithContent(items: FeedItem[], source: FeedSourceCo
 				content,
 				summary,
 				author: metadata.author || item.author,
+				imageUrl: metadata.imageUrl || item.imageUrl,
 				// Store lightweight metadata without bloating the item
 			};
 		} finally {

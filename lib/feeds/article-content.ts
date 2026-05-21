@@ -1,6 +1,6 @@
 import { load } from 'cheerio';
 
-import { stripHtml } from '@/lib/feeds/normalize';
+import { sanitizeArticleImageUrl, stripHtml } from '@/lib/feeds/normalize';
 
 const NOISE_SELECTORS = [
 	'script',
@@ -83,6 +83,7 @@ export interface ArticleMetadata {
 	author?: string;
 	publishedDate?: string;
 	category?: string;
+	imageUrl?: string;
 	linkedDocuments?: Array<{ url: string; title: string; isPdf: boolean }>;
 }
 
@@ -176,6 +177,27 @@ function extractPublishedDate(html: string): string | undefined {
 			if (content) {
 				return content;
 			}
+		}
+	}
+
+	return undefined;
+}
+
+function extractLeadImage(html: string, pageUrl: string): string | undefined {
+	const $ = load(html);
+	const candidates = [
+		$('meta[property="og:image"]').attr('content'),
+		$('meta[name="twitter:image"]').attr('content'),
+		$('link[rel="image_src"]').attr('href'),
+		$('article img').first().attr('src') || $('article img').first().attr('data-src'),
+		$('main img').first().attr('src') || $('main img').first().attr('data-src'),
+		$('img').first().attr('src') || $('img').first().attr('data-src'),
+	];
+
+	for (const candidate of candidates) {
+		const imageUrl = sanitizeArticleImageUrl(candidate, pageUrl);
+		if (imageUrl) {
+			return imageUrl;
 		}
 	}
 
@@ -308,6 +330,7 @@ export function extractArticleMetadata(html: string, url: string): ArticleMetada
 		author: extractAuthor(html),
 		publishedDate: extractPublishedDate(html),
 		category: inferCategory(html, url),
+		imageUrl: extractLeadImage(html, url),
 		linkedDocuments: detectLinkedDocuments(html),
 	};
 }

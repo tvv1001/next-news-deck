@@ -3,6 +3,12 @@ export type FeedVelocity = 'fast' | 'slow';
 export type CacheMode = 'memory' | 'redis';
 export type FeedSourceCrawlEngine = 'cheerio' | 'scrapy';
 
+export interface FeedResourceLink {
+	title: string;
+	url: string;
+	sourceLabel?: string;
+}
+
 export interface FeedItem {
 	id: string;
 	dedupeKey: string;
@@ -21,6 +27,8 @@ export interface FeedItem {
 	tags: string[];
 	originFeedUrl: string;
 	discoverySource?: 'bing' | 'google';
+	additionalImageUrls?: string[];
+	resourceLinks?: FeedResourceLink[];
 }
 
 export interface FeedSourceConfig {

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { FeedItem, FeedSourceConfig } from '@/lib/feeds/types';
+import { FeedItem, FeedResourceLink, FeedSourceConfig } from '@/lib/feeds/types';
 
 export interface ParsedFeedItem {
 	'title'?: string;
@@ -67,6 +67,7 @@ function looksLikeBlockedImage(url: string) {
 	try {
 		const parsed = new URL(url);
 		const combined = `${parsed.hostname}${parsed.pathname}${parsed.search}`.toLowerCase();
+		const lastPathSegment = parsed.pathname.split('/').filter(Boolean).at(-1)?.toLowerCase() ?? '';
 
 		if (BLOCKED_IMAGE_HOSTS.test(parsed.hostname)) {
 			return true;
@@ -77,6 +78,10 @@ function looksLikeBlockedImage(url: string) {
 		}
 
 		if (BLOCKED_IMAGE_KEYWORDS.test(combined)) {
+			return true;
+		}
+
+		if (!lastPathSegment || lastPathSegment === 'undefined' || lastPathSegment === 'null') {
 			return true;
 		}
 
@@ -169,6 +174,55 @@ function extractFeedImageUrl(item: ParsedFeedItem, source: FeedSourceConfig, art
 	return extractImageFromHtml(item.content, baseUrl);
 }
 
+function mergeResourceLinks(...linkSets: Array<FeedResourceLink[] | undefined>) {
+	const deduped = new Map<string, FeedResourceLink>();
+
+	for (const links of linkSets) {
+		for (const link of links ?? []) {
+			const url = link.url?.trim();
+			if (!url) {
+				continue;
+			}
+
+			const key = url.toLowerCase();
+			const existing = deduped.get(key);
+			if (!existing) {
+				deduped.set(key, {
+					title: link.title?.trim() || url,
+					url,
+					sourceLabel: link.sourceLabel?.trim() || undefined,
+				});
+				continue;
+			}
+
+			deduped.set(key, {
+				title: existing.title.length >= (link.title?.trim().length ?? 0) ? existing.title : link.title?.trim() || existing.title,
+				url,
+				sourceLabel: existing.sourceLabel ?? link.sourceLabel?.trim() ?? undefined,
+			});
+		}
+	}
+
+	return [...deduped.values()];
+}
+
+function mergeImageUrls(...imageSets: Array<string[] | undefined>) {
+	const deduped = new Set<string>();
+
+	for (const imageSet of imageSets) {
+		for (const imageUrl of imageSet ?? []) {
+			const sanitized = sanitizeArticleImageUrl(imageUrl);
+			if (!sanitized) {
+				continue;
+			}
+
+			deduped.add(sanitized);
+		}
+	}
+
+	return [...deduped];
+}
+
 export function stripHtml(input?: string): string {
 	if (!input) {
 		return '';
@@ -240,6 +294,7 @@ function feedItemRichnessScore(item: FeedItem) {
 		(item.content?.length ?? 0) +
 		Math.round((item.summary?.length ?? 0) / 2) +
 		(item.imageUrl ? 500 : 0) +
+		(item.additionalImageUrls?.length ?? 0) * 120 +
 		(item.videoEmbedUrl ? 750 : 0) +
 		(item.videoUrl ? 600 : 0) +
 		(item.author ? 50 : 0)
@@ -267,10 +322,17 @@ export function dedupeAndSortFeedItems(items: FeedItem[]): FeedItem[] {
 			summary: preferred.summary.length >= fallback.summary.length ? preferred.summary : fallback.summary,
 			content: (preferred.content?.length ?? 0) >= (fallback.content?.length ?? 0) ? preferred.content : fallback.content,
 			imageUrl: preferred.imageUrl ?? fallback.imageUrl,
+			additionalImageUrls: mergeImageUrls(
+				fallback.imageUrl ? [fallback.imageUrl, ...(fallback.additionalImageUrls ?? [])] : fallback.additionalImageUrls,
+				preferred.imageUrl ? [preferred.imageUrl, ...(preferred.additionalImageUrls ?? [])] : preferred.additionalImageUrls,
+			)
+				.filter((imageUrl) => imageUrl !== (preferred.imageUrl ?? fallback.imageUrl))
+				.slice(0, 5),
 			videoUrl: preferred.videoUrl ?? fallback.videoUrl,
 			videoEmbedUrl: preferred.videoEmbedUrl ?? fallback.videoEmbedUrl,
 			author: preferred.author ?? fallback.author,
 			discoverySource: preferred.discoverySource ?? fallback.discoverySource,
+			resourceLinks: mergeResourceLinks(fallback.resourceLinks, preferred.resourceLinks),
 			tags: [...new Set([...(fallback.tags ?? []), ...(preferred.tags ?? [])])],
 		});
 	}
